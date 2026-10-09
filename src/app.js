@@ -1,13 +1,30 @@
 (function () {
   const CART_KEY = "luxe-trade-cart";
   const ADMIN_PAGE_SIZE = 80;
+  const SITE_NAME = "BeBeauty Wholesale Catalog";
+  const PUBLIC_ORIGIN = "https://bebeauty.top";
+  const HOME_DESCRIPTION = "Browse wholesale cosmetics and beauty products by brand, category, SKU, shade and price. Create an order number for supplier confirmation.";
+
+  function productIdFromPath() {
+    const match = location.pathname.match(/^\/product\/(.+?)\/?$/);
+    if (!match) return "";
+    try {
+      return decodeURIComponent(match[1]);
+    } catch {
+      return "";
+    }
+  }
+
+  const initialProductId = productIdFromPath();
+  const initialParams = new URLSearchParams(location.search);
 
   const state = {
-    view: location.hash === "#admin" ? "admin" : location.hash === "#cart" ? "cart" : "catalog",
-    detailId: null,
-    search: "",
-    brand: "All",
-    category: "All",
+    view: initialProductId ? "detail" : location.hash === "#admin" ? "admin" : location.hash === "#cart" ? "cart" : "catalog",
+    detailId: initialProductId || null,
+    search: initialParams.get("q") || "",
+    brand: initialParams.get("brand") || "All",
+    category: initialParams.get("category") || "All",
+    newArrivals: initialParams.get("new") === "1",
     sort: "featured",
     editingId: null,
     selectedColor: "",
@@ -23,6 +40,10 @@
     adminStatus: "",
     adminSearch: "",
     adminPage: 1,
+    salesReport: null,
+    salesReportLoading: false,
+    salesReportError: "",
+    salesReportRequested: false,
     loading: true,
   };
 
@@ -34,11 +55,11 @@
   let apiOnline = false;
 
   const PRODUCT_QA = [
-    ["Are these items authentic makeup?", "No, these items copied items."],
-    ["If all products are scannable on the application Sephora?", "Sorry, since these items are copied items, and we do not have Sephora system here, we do not assure all these items are scannable on the application Sephora."],
-    ["How does the order process work?", "1. Please add the items, colors and qty you need into the cart, then press Create order & Contact Supplier. 2. After all details are agreed by both of us, we will create order and send you payment link on Alibaba. WE DEAL ON ALIBABA. 3. We send goods to you after you paid on Alibaba."],
-    ["How long is the delivery?", "Usually, goods will be sent out to forwarder within 3 working days after payment received, then you can get the parcel within 12-15 days after the forwarder sent out."],
-    ["What should we do if the goods broken during transportation?", "We can send the replacement with your next order or refund the cost of the broken items to you."],
+    ["Are these products authentic?", "No. These are replica products and are not sold as authentic branded goods."],
+    ["Can every product be scanned in the Sephora app?", "No. Sephora app scanning is not guaranteed for these products."],
+    ["How does the order process work?", "Add products, shades and quantities to the cart, create an order number, then confirm availability and the Alibaba payment link through WhatsApp."],
+    ["How long does delivery take?", "Goods are normally sent to the forwarder within three working days after payment. Forwarder delivery is usually 12 to 15 days."],
+    ["What happens if goods are damaged during transportation?", "A replacement can be sent with the next order or the damaged item cost can be refunded after confirmation."],
   ];
 
   function readJSON(key, fallback) {
@@ -177,6 +198,22 @@
     products = (payload.products || []).map(normalizeProduct);
   }
 
+  async function loadSalesReport() {
+    if (!isAdminAuthed || state.salesReportLoading || state.salesReportRequested) return;
+    state.salesReportRequested = true;
+    state.salesReportLoading = true;
+    state.salesReportError = "";
+    try {
+      state.salesReport = await apiFetch("/api/admin/sales-report");
+    } catch (error) {
+      state.salesReport = null;
+      state.salesReportError = error.message;
+    } finally {
+      state.salesReportLoading = false;
+      if (state.view === "admin" && isAdminAuthed) renderAdmin();
+    }
+  }
+
   function cleanColorList(items) {
     const cleaned = (items || [])
       .flatMap((item) => splitColorText(item))
@@ -195,18 +232,26 @@
   }
 
   function extractColorOptions(info, fallback = []) {
+    const fallbackColors = cleanColorList(fallback);
+    if (fallbackColors.length) return fallbackColors;
     const text = String(info || "");
     const match = text.match(/colou?rs?\s*[:：]\s*(.*)/i);
-    if (!match) return cleanColorList(fallback);
+    if (!match) return [];
     const raw = match[1]
       .split(/\s+(?:size|gross\s*weight|gross|net\s*(?:weight|wet|wight)|weight)\s*[:：]?/i)[0];
     const parsed = cleanColorList(raw.split("/"));
-    return parsed.length ? parsed : cleanColorList(fallback);
+    return parsed;
+  }
+
+  function normalizeAssetUrl(value) {
+    const url = String(value || "").trim().replace(/\\/g, "/");
+    if (!url || /^(?:https?:|data:|blob:)/i.test(url) || url.startsWith("/")) return url;
+    return `/${url.replace(/^\.\//, "").replace(/^\/+/, "")}`;
   }
 
   function normalizeProduct(product) {
-    const images = cleanImageList(product.images || []);
-    const image = String(product.image || images[0] || "").trim();
+    const images = cleanImageList(product.images || []).map(normalizeAssetUrl);
+    const image = normalizeAssetUrl(product.image || images[0] || "");
     if (image && !images.includes(image)) images.unshift(image);
     return {
       ...product,
@@ -266,6 +311,7 @@
   function filteredProducts() {
     const q = state.search.trim().toLowerCase();
     let list = products.filter((p) => p.published !== false);
+    if (state.newArrivals) list = list.filter((p) => p.is_new_arrival);
     if (q) list = list.filter((p) => [p.sku, p.brand, p.name, p.description, p.category].join(" ").toLowerCase().includes(q));
     if (state.brand !== "All") list = list.filter((p) => p.brand === state.brand);
     if (state.category !== "All") list = list.filter((p) => p.category === state.category);
@@ -293,8 +339,14 @@
     });
   }
 
-  function shippingCost(country, totalWeight) {
-    const kg = Math.max(0, Number(totalWeight || 0));
+  function billableShippingWeight(country, productWeight) {
+    const kg = Math.max(0, Number(productWeight || 0));
+    if (country !== "Europe" || kg <= 6) return kg;
+    return Math.ceil((kg + 2 - Number.EPSILON) * 2) / 2;
+  }
+
+  function shippingCost(country, billableWeight) {
+    const kg = Math.max(0, Number(billableWeight || 0));
     if (country === "United States") {
       if (kg <= 0.7) return 48.8;
       if (kg <= 1.2) return 65.4;
@@ -305,22 +357,23 @@
       if (kg <= 15) return kg * 19.3;
       return kg * 17.3;
     }
-    if (kg <= 0.7) return 29.8;
-    if (kg <= 1.2) return 35.2;
+    if (kg <= 0.7) return 31.2;
+    if (kg <= 1.5) return 35.2;
     if (kg <= 2) return 43.8;
-    if (kg <= 3) return 49.8;
-    if (kg <= 4) return 59.5;
-    if (kg <= 5) return 71.6;
-    if (kg <= 15) return kg * 10.3;
-    return kg * 9.85;
+    if (kg <= 3) return 52.3;
+    if (kg <= 4) return 61.8;
+    if (kg <= 5) return 72.3;
+    if (kg <= 6) return 81.4;
+    return kg * 10.8;
   }
 
   function cartTotals() {
     const lines = cartLines();
     const productTotal = lines.reduce((sum, item) => sum + item.qty * item.price, 0);
     const totalWeight = lines.reduce((sum, item) => sum + item.qty * Number(item.weight || 0), 0);
-    const shipping = lines.length ? shippingCost(state.shippingCountry, totalWeight) : 0;
-    return { lines, productTotal, totalWeight, shipping, total: productTotal + shipping };
+    const shippingWeight = lines.length ? billableShippingWeight(state.shippingCountry, totalWeight) : 0;
+    const shipping = lines.length ? shippingCost(state.shippingCountry, shippingWeight) : 0;
+    return { lines, productTotal, totalWeight, shippingWeight, shipping, total: productTotal + shipping };
   }
 
   function shadeOptions(product) {
@@ -363,6 +416,7 @@
 
   function activeFilterChips() {
     const chips = [];
+    if (state.newArrivals) chips.push({ label: "New arrivals", key: "new" });
     if (state.search.trim()) chips.push({ label: `Search: ${state.search.trim()}`, key: "search" });
     if (state.brand !== "All") chips.push({ label: `Brand: ${state.brand}`, key: "brand" });
     if (state.category !== "All") chips.push({ label: `Category: ${state.category}`, key: "category" });
@@ -420,12 +474,112 @@
     return `<div class="bottle" data-brand="${escapeHTML(product.brand)}"></div>`;
   }
 
-  function openDetail(id) {
+  function productPath(id) {
+    return `/product/${encodeURIComponent(id)}`;
+  }
+
+  function setMeta(selector, attribute, value) {
+    let element = document.head.querySelector(selector);
+    if (!element) {
+      element = document.createElement("meta");
+      const propertyMatch = selector.match(/^meta\[property="([^"]+)"\]$/);
+      const nameMatch = selector.match(/^meta\[name="([^"]+)"\]$/);
+      if (propertyMatch) element.setAttribute("property", propertyMatch[1]);
+      if (nameMatch) element.setAttribute("name", nameMatch[1]);
+      document.head.appendChild(element);
+    }
+    element.setAttribute(attribute, value);
+  }
+
+  function setCanonical(url) {
+    let canonical = document.head.querySelector('link[rel="canonical"]');
+    if (!canonical) {
+      canonical = document.createElement("link");
+      canonical.rel = "canonical";
+      document.head.appendChild(canonical);
+    }
+    canonical.href = url;
+  }
+
+  function metadataDescription(product) {
+    const identity = `${product.name} by ${product.brand}, SKU ${product.sku}.`;
+    const description = String(product.description || "").replace(/\s+/g, " ").trim();
+    return `${identity} ${description} Wholesale beauty catalog with shade selection and order-number confirmation.`
+      .slice(0, 158)
+      .replace(/[\s,.;]+$/, "") + ".";
+  }
+
+  function updatePageMetadata() {
+    const product = state.view === "detail" ? products.find((item) => item.id === state.detailId && item.published !== false && !item.archived_at) : null;
+    const privateView = state.view === "admin" || state.view === "cart";
+    const filters = [["brand", state.brand], ["category", state.category]].filter(([, value]) => value !== "All");
+    const extraParams = [...new URLSearchParams(location.search).keys()].some((key) => !["brand", "category"].includes(key));
+    const collection = state.view === "catalog" && filters.length === 1 && !state.search && !state.newArrivals && !extraParams;
+    const filteredView = state.view === "catalog" && (filters.length > 1 || state.search || state.newArrivals || extraParams);
+    const heading = collection ? `${filters[0][1]} Wholesale Beauty Products` : "Wholesale Beauty Products";
+    const missingProduct = state.view === "detail" && !product;
+    const title = product ? `${product.name} Wholesale | BeBeauty` : missingProduct ? "Product not found | BeBeauty" : `${heading} | BeBeauty`;
+    const description = product ? metadataDescription(product) : collection ? `Browse ${filters[0][1]} wholesale beauty products, USD prices, shade options and product images. Confirm availability with the supplier before payment.` : HOME_DESCRIPTION;
+    const canonical = product ? new URL(productPath(product.id), PUBLIC_ORIGIN).href : collection ? new URL(collectionPath(...filters[0]), PUBLIC_ORIGIN).href : `${PUBLIC_ORIGIN}/`;
+    document.title = title;
+    setCanonical(canonical);
+    document.head.querySelectorAll('link[rel="alternate"][hreflang]').forEach((link) => { link.href = canonical; });
+    setMeta('meta[name="description"]', "content", description);
+    setMeta('meta[name="robots"]', "content", privateView || missingProduct ? "noindex,nofollow" : filteredView ? "noindex,follow" : "index,follow,max-image-preview:large,max-snippet:-1");
+    setMeta('meta[property="og:site_name"]', "content", SITE_NAME);
+    setMeta('meta[property="og:type"]', "content", product ? "product" : "website");
+    setMeta('meta[property="og:title"]', "content", title);
+    setMeta('meta[property="og:description"]', "content", description);
+    setMeta('meta[property="og:url"]', "content", canonical);
+    const image = product?.image ? new URL(product.image.replace(/^\.\//, "/"), PUBLIC_ORIGIN).href : "";
+    if (image) setMeta('meta[property="og:image"]', "content", image);
+    else document.head.querySelector('meta[property="og:image"]')?.remove();
+    setMeta('meta[name="twitter:card"]', "content", image ? "summary_large_image" : "summary");
+    const organization = { "@type": "Organization", "@id": `${PUBLIC_ORIGIN}/#organization`, name: SITE_NAME, alternateName: "Luxe Trade Catalog", url: `${PUBLIC_ORIGIN}/` };
+    const graph = [organization, { "@type": "WebSite", "@id": `${PUBLIC_ORIGIN}/#website`, name: SITE_NAME, url: `${PUBLIC_ORIGIN}/`, publisher: { "@id": organization["@id"] } }];
+    if (product) {
+      graph.push({ "@type": "Product", "@id": `${canonical}#product`, name: product.name, sku: product.sku, category: product.category, description, url: canonical,
+        brand: { "@type": "Brand", name: product.brand }, ...(image ? { image: productImages(product).map((value) => new URL(value, PUBLIC_ORIGIN).href) } : {}),
+        offers: { "@type": "Offer", url: canonical, priceCurrency: "USD", price: Number(product.price).toFixed(2), seller: { "@id": organization["@id"] } } });
+      graph.push({ "@type": "BreadcrumbList", itemListElement: [["Wholesale beauty products", `${PUBLIC_ORIGIN}/`], [product.brand, new URL(collectionPath("brand", product.brand), PUBLIC_ORIGIN).href], [product.name, canonical]].map(([name, item], index) => ({ "@type": "ListItem", position: index + 1, name, item })) });
+    } else if (!privateView && !missingProduct) {
+      const list = filteredProducts();
+      graph.push({ "@type": "CollectionPage", name: heading, description, url: canonical, isPartOf: { "@id": `${PUBLIC_ORIGIN}/#website` }, mainEntity: { "@type": "ItemList", numberOfItems: list.length, itemListElement: list.map((item, index) => ({ "@type": "ListItem", position: index + 1, name: item.name, url: new URL(productPath(item.id), PUBLIC_ORIGIN).href })) } });
+    }
+    if (!privateView && !missingProduct) graph.push({ "@type": "FAQPage", mainEntity: PRODUCT_QA.map(([name, text]) => ({ "@type": "Question", name, acceptedAnswer: { "@type": "Answer", text } })) });
+    // Replace server metadata when SPA navigation changes the visible page.
+    document.head.querySelectorAll('script[type="application/ld+json"]').forEach((script) => script.remove());
+    if (!privateView && !missingProduct) {
+      const script = document.createElement("script");
+      script.type = "application/ld+json";
+      script.textContent = JSON.stringify({ "@context": "https://schema.org", "@graph": graph });
+      document.head.appendChild(script);
+    }
+  }
+
+  function collectionPath(field, value) {
+    return `/?${new URLSearchParams({ [field]: value })}`;
+  }
+
+  function updateCatalogUrl(replace = false) {
+    const params = new URLSearchParams();
+    if (state.newArrivals) params.set("new", "1");
+    if (state.brand !== "All") params.set("brand", state.brand);
+    if (state.category !== "All") params.set("category", state.category);
+    if (state.search) params.set("q", state.search);
+    const query = params.toString();
+    history[replace ? "replaceState" : "pushState"]({ view: "catalog" }, "", query ? `/?${query}` : "/");
+  }
+
+  function openDetail(id, pushHistory = true) {
     state.view = "detail";
     state.detailId = id;
     state.qty = 1;
     state.selectedColor = "";
     state.selectedImage = "";
+    if (pushHistory && location.pathname !== productPath(id)) {
+      history.pushState({ view: "detail", id }, "", productPath(id));
+    }
     render();
     window.setTimeout(() => {
       document.documentElement.scrollTop = 0;
@@ -447,7 +601,7 @@
     document.getElementById("app").innerHTML = `
       <div class="app">
         <header class="topbar">
-          <div class="brand" role="button" data-view="catalog"><span class="brand-mark">L</span><span>Luxe Trade Catalog</span></div>
+          <a class="brand" href="/" data-view="catalog"><span class="brand-mark">L</span><span>Luxe Trade Catalog</span></a>
           <nav class="nav">
             <button class="${state.view === "catalog" ? "active" : ""}" data-view="catalog">Products</button>
             <button class="${state.view === "admin" ? "active" : ""}" data-view="admin">Admin</button>
@@ -455,6 +609,7 @@
           </nav>
         </header>
         ${content}
+        ${state.view === "catalog" || state.view === "detail" ? '<footer class="site-footer"><a href="/">Product catalog</a><a href="/ordering">Ordering &amp; delivery</a><a href="/sitemap.xml">Sitemap</a><span>Prices in USD. Availability confirmed by supplier.</span></footer>' : ""}
         ${cartFeedbackHTML()}
         ${quickAddModalHTML()}
       </div>`;
@@ -465,6 +620,7 @@
       layout(`<main class="content"><div class="empty">Loading catalog...</div></main>`);
       return;
     }
+    updatePageMetadata();
     if (state.view === "detail") return renderDetail();
     if (state.view === "cart") return renderCart();
     if (state.view === "admin") return renderAdmin();
@@ -484,6 +640,7 @@
   }
 
   function renderCatalog() {
+    updatePageMetadata();
     const list = filteredProducts();
     const visibleProducts = products.filter((p) => p.published !== false);
     layout(`
@@ -491,6 +648,7 @@
       <div class="catalog-sticky">
         <section class="toolbar" id="products">
           <label class="filter-field search-field"><span>Search</span><input class="search" data-action="search" placeholder="Search SKU, brand, product..." value="${escapeHTML(state.search)}">${searchSuggestions()}</label>
+          <button type="button" class="new-arrivals ${state.newArrivals ? "active" : ""}" data-new-arrivals aria-pressed="${state.newArrivals}">NEW ARRIVALS</button>
           <label class="filter-field"><span>Brand</span><select data-action="brand">${brands().map((b) => `<option ${b === state.brand ? "selected" : ""}>${escapeHTML(b)}</option>`).join("")}</select></label>
           <label class="filter-field"><span>Category</span><select data-action="category">${categories().map((c) => `<option ${c === state.category ? "selected" : ""}>${escapeHTML(c)}</option>`).join("")}</select></label>
           <label class="filter-field"><span>Sort</span><select data-action="sort">
@@ -503,10 +661,12 @@
         ${activeFilterChips()}
       </div>
       <main class="content">
-        <div class="section-title compact-title"><div><h2>Products</h2><p>${list.length} matching items</p></div></div>
+        <div class="section-title compact-title"><div><h1>${state.brand !== "All" && state.category === "All" ? `${escapeHTML(state.brand)} Wholesale Beauty Products` : state.category !== "All" && state.brand === "All" ? `${escapeHTML(state.category)} Wholesale Beauty Products` : "Wholesale Beauty Products"}</h1><p>${list.length} matching items</p></div></div>
         <div class="grid">
-          ${list.map(productCard).join("")}
+          ${list.map((product, index) => productCard(product, index)).join("")}
         </div>
+        <nav class="collection-links" aria-label="Categories">${categories().filter((value) => value !== "All").map((value) => `<a href="${escapeHTML(collectionPath("category", value))}" data-filter-category="${escapeHTML(value)}">${escapeHTML(value)}</a>`).join("")}</nav>
+        ${qaSection()}
       </main>`);
   }
 
@@ -524,23 +684,23 @@
           <span>All</span><em>${visibleProducts.length}</em>
         </button>
         ${brandItems.map((brand) => `
-          <button class="${state.brand === brand ? "active" : ""}" data-filter-brand="${escapeHTML(brand)}" title="Show ${escapeHTML(brand)} products">
+          <a href="${escapeHTML(collectionPath("brand", brand))}" class="${state.brand === brand ? "active" : ""}" data-filter-brand="${escapeHTML(brand)}" title="Show ${escapeHTML(brand)} products">
             <span>${escapeHTML(brand)}</span><em>${counts.get(brand) || 0}</em>
-          </button>`).join("")}
+          </a>`).join("")}
       </aside>`;
   }
 
-  function productCard(p) {
+  function productCard(p, index = 0) {
     const options = shadeOptions(p);
     return `
       <article class="card">
-        <button class="product-image" data-detail="${escapeHTML(p.id)}" aria-label="View ${escapeHTML(p.name)}">${productImage(p)}</button>
+        <a class="product-image" href="${escapeHTML(productPath(p.id))}" data-detail="${escapeHTML(p.id)}" aria-label="View ${escapeHTML(p.name)}">${productImage(p, index < 5 ? "eager" : "lazy")}</a>
         <div class="card-body">
           <div class="meta">
-            <button class="tag tag-button" data-filter-brand="${escapeHTML(p.brand)}" title="Show all ${escapeHTML(p.brand)} products">${escapeHTML(p.brand)}</button>
-            <button class="tag tag-button" data-filter-category="${escapeHTML(p.category)}" title="Show all ${escapeHTML(p.category)} products">${escapeHTML(p.category)}</button>
+            <a class="tag tag-button" href="${escapeHTML(collectionPath("brand", p.brand))}" data-filter-brand="${escapeHTML(p.brand)}" title="Show all ${escapeHTML(p.brand)} products">${escapeHTML(p.brand)}</a>
+            <a class="tag tag-button" href="${escapeHTML(collectionPath("category", p.category))}" data-filter-category="${escapeHTML(p.category)}" title="Show all ${escapeHTML(p.category)} products">${escapeHTML(p.category)}</a>
           </div>
-          <h3>${escapeHTML(p.name)}</h3>
+          <h3><a class="product-title-link" href="${escapeHTML(productPath(p.id))}" data-detail="${escapeHTML(p.id)}">${escapeHTML(p.name)}</a>${p.is_best_seller ? ' <span class="best-seller">best seller</span>' : ""}</h3>
           <p class="desc">${escapeHTML(p.description)}</p>
           <div class="card-signals"><span>${options.length} shade${options.length === 1 ? "" : "s"}</span><span>SKU ${escapeHTML(p.sku)}</span></div>
           ${cartStatusForProduct(p.id)}
@@ -550,8 +710,8 @@
   }
 
   function renderDetail() {
-    const p = products.find((item) => item.id === state.detailId) || products[0];
-    if (!p) return renderCatalog();
+    const p = products.find((item) => item.id === state.detailId && item.published !== false && !item.archived_at);
+    if (!p) return layout('<main class="content"><h1>Product not found</h1><p>This product is no longer available.</p><a href="/">Browse products</a></main>');
     const options = shadeOptions(p);
     if (!options.includes(state.selectedColor)) state.selectedColor = options[0];
     const images = productImages(p);
@@ -643,7 +803,7 @@
             </label>
             <div class="total-box">
               <div><span>Product total</span><strong>${money(totals.productTotal)}</strong></div>
-              <div><span>Total weight</span><strong>${weight(totals.totalWeight)}</strong></div>
+              <div><span>Shipping weight</span><strong>${weight(totals.shippingWeight)}</strong></div>
               <div><span>SHIPPING COST</span><strong>${money(totals.shipping)}</strong></div>
               <div><span>TOTAL</span><strong>${money(totals.total)}</strong></div>
             </div>
@@ -733,6 +893,7 @@
 
   function renderAdmin() {
     if (!isAdminAuthed) return renderAdminLogin();
+    if (!state.salesReportRequested) window.setTimeout(loadSalesReport, 0);
     const editing = products.find((p) => p.id === state.editingId) || null;
     const p = editing || { sku: "", brand: "", name: "", category: "Cosmetics", price: "", stock: "", weight: "", description: "", colors: [], image: "", images: [], published: true };
     const adminProducts = filteredAdminProducts();
@@ -752,6 +913,16 @@
             ${field("Order No.", `<input name="orderNo" placeholder="DL202606110930001A2B" required>`)}
             <button class="primary" type="submit">Download order Excel</button>
           </form>
+        </section>
+        <section class="panel sales-report-panel">
+          <div class="sales-report-head">
+            <div><h3>Top 20 best-selling products</h3><p class="small">Ranked by quantity in submitted orders.</p></div>
+            <div class="sales-report-actions">
+              <button class="ghost" type="button" data-sales-refresh>Refresh statistics</button>
+              <a class="primary" href="/api/admin/sales-report/excel">Export all products</a>
+            </div>
+          </div>
+          ${salesReportHTML()}
         </section>
         <div class="admin-grid">
           <form class="panel form-stack" data-admin-form novalidate>
@@ -974,6 +1145,57 @@
       </main>`);
   }
 
+  function salesReportDate(timestamp) {
+    if (!timestamp) return "No orders";
+    return new Date(Number(timestamp) * 1000).toLocaleString("en-GB", {
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+  }
+
+  function salesReportHTML() {
+    const report = state.salesReport;
+    if (state.salesReportLoading) {
+      return `<div class="notice">Loading sales statistics...</div>`;
+    }
+    if (state.salesReportError) {
+      return `<div class="notice">${escapeHTML(state.salesReportError)}</div>`;
+    }
+    if (!report) return `<div class="notice">Sales statistics are not loaded yet.</div>`;
+    const rows = report.rows || [];
+    if (!rows.length) return `<div class="empty">No submitted order data yet.</div>`;
+    return `
+      <div class="sales-report-summary">
+        <span>Top 20 units: <strong>${Number(report.total_units || 0).toLocaleString()}</strong></span>
+        <span>Top 20 revenue: <strong>${money(report.total_revenue)}</strong></span>
+        <span>Based on submitted orders</span>
+      </div>
+      <div class="sales-report-table-wrap">
+        <table class="sales-report-table">
+          <thead><tr><th>Rank</th><th>Product</th><th>Units sold</th><th>Orders</th><th>Revenue</th><th>Last order</th></tr></thead>
+          <tbody>
+            ${rows.map((row, index) => `
+              <tr>
+                <td class="sales-rank">${index + 1}</td>
+                <td>
+                  <div class="sales-product-cell">
+                    <div class="sales-report-thumb">${row.image ? `<img src="${escapeHTML(adminThumbSrc(row.image))}" alt="${escapeHTML(row.name)}" loading="lazy" decoding="async">` : escapeHTML(String(row.brand || "").slice(0, 2))}</div>
+                    <div><strong>${escapeHTML(row.name)}</strong><span>${escapeHTML(row.sku)} · ${escapeHTML(row.brand)}</span></div>
+                  </div>
+                </td>
+                <td><strong>${Number(row.units_sold || 0).toLocaleString()}</strong></td>
+                <td>${Number(row.order_count || 0).toLocaleString()}</td>
+                <td>${money(row.revenue)}</td>
+                <td>${escapeHTML(salesReportDate(row.last_order_at))}</td>
+              </tr>`).join("")}
+          </tbody>
+        </table>
+      </div>`;
+  }
+
   function adminRow(p) {
     return `
       <div class="admin-row">
@@ -1005,8 +1227,18 @@
   }
 
   document.addEventListener("click", async (event) => {
-    const target = event.target.closest("button, .brand, [data-quick-backdrop]");
+    const target = event.target.closest("button, a[data-detail], a[data-filter-brand], a[data-filter-category], .brand, [data-quick-backdrop]");
     if (!target) return;
+    if (target.tagName === "A") {
+      if (event.ctrlKey || event.metaKey || event.shiftKey || event.altKey || event.button !== 0) return;
+      event.preventDefault();
+    }
+    if (target.hasAttribute("data-new-arrivals")) {
+      state.newArrivals = !state.newArrivals;
+      updateCatalogUrl();
+      renderCatalog();
+      return;
+    }
     if (target.dataset.quickBackdrop !== undefined && event.target === target) {
       state.quickAddId = null;
       render();
@@ -1014,9 +1246,11 @@
     }
     if (target.dataset.clearFilter) {
       const key = target.dataset.clearFilter;
+      if (key === "new" || key === "all") state.newArrivals = false;
       if (key === "search" || key === "all") state.search = "";
       if (key === "brand" || key === "all") state.brand = "All";
       if (key === "category" || key === "all") state.category = "All";
+      updateCatalogUrl();
       renderCatalog();
       return;
     }
@@ -1026,6 +1260,7 @@
       state.search = "";
       state.brand = target.dataset.filterBrand;
       state.category = "All";
+      updateCatalogUrl();
       render();
       window.setTimeout(() => document.getElementById("products")?.scrollIntoView({ behavior: "smooth" }), 0);
       return;
@@ -1036,6 +1271,7 @@
       state.search = "";
       state.brand = "All";
       state.category = target.dataset.filterCategory;
+      updateCatalogUrl();
       render();
       window.setTimeout(() => document.getElementById("products")?.scrollIntoView({ behavior: "smooth" }), 0);
       return;
@@ -1043,7 +1279,10 @@
     if (target.dataset.view) {
       state.view = target.dataset.view;
       state.detailId = null;
+      if (state.view === "catalog") updateCatalogUrl();
+      else history.pushState({ view: state.view }, "", `/#${state.view}`);
       render();
+      return;
     }
     if (target.dataset.adminPage) {
       const totalPages = Math.max(1, Math.ceil(filteredAdminProducts().length / ADMIN_PAGE_SIZE));
@@ -1054,8 +1293,18 @@
       renderAdmin();
       return;
     }
+    if (target.dataset.salesRefresh !== undefined) {
+      if (!isAdminAuthed) return renderAdminLogin();
+      state.salesReportRequested = false;
+      state.salesReport = null;
+      state.salesReportError = "";
+      renderAdmin();
+      loadSalesReport();
+      return;
+    }
     if (target.dataset.scroll) document.getElementById(target.dataset.scroll)?.scrollIntoView({ behavior: "smooth" });
     if (target.dataset.detail) {
+      event.preventDefault();
       openDetail(target.dataset.detail);
       return;
     }
@@ -1135,6 +1384,9 @@
       isAdminAuthed = false;
       state.editingId = null;
       state.adminStatus = "";
+      state.salesReport = null;
+      state.salesReportError = "";
+      state.salesReportRequested = false;
       render();
     }
     if (target.dataset.edit) {
@@ -1162,12 +1414,17 @@
     }
   });
 
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && event.target.closest(".search-field")) event.target.blur();
+  });
+
   document.addEventListener("input", (event) => {
     const el = event.target;
     if (el.dataset.action === "search") {
       const start = el.selectionStart ?? el.value.length;
       const end = el.selectionEnd ?? start;
       state.search = el.value;
+      updateCatalogUrl(true);
       renderCatalog();
       refocusControl('[data-action="search"]', start, end);
     }
@@ -1192,10 +1449,12 @@
     const el = event.target;
     if (el.dataset.action === "brand") {
       state.brand = el.value;
+      updateCatalogUrl();
       renderCatalog();
     }
     if (el.dataset.action === "category") {
       state.category = el.value;
+      updateCatalogUrl();
       renderCatalog();
     }
     if (el.dataset.action === "sort") {
@@ -1308,7 +1567,7 @@
     }
     whatsappNumber = String(data.whatsapp || whatsappNumber).replace(/[^\d]/g, "") || whatsappNumber;
     const colorOptions = cleanColorList(splitColorText(data.colors));
-    const product = normalizeProduct({
+    const product = {
       id: data.sku.trim(),
       sku: data.sku.trim(),
       brand: data.brand.trim(),
@@ -1319,10 +1578,10 @@
       weight: positiveDecimal(data.weight),
       description: data.description.trim(),
       colors: colorOptions,
-      image: data.image.trim(),
-      images: cleanImageList(String(data.images || "").split(/\n|,/)),
+      image: normalizeAssetUrl(String(data.image || "").trim()),
+      images: cleanImageList(String(data.images || "").split(/\n|,/)).map(normalizeAssetUrl),
       published: data.published === "on",
-    });
+    };
     if (!product.sku || !product.name) return;
     const feedback = form.querySelector("[data-save-feedback]");
     const submitButton = form.querySelector('button[type="submit"]');
@@ -1365,6 +1624,18 @@
     } finally {
       if (submitButton) submitButton.disabled = false;
     }
+  });
+
+  window.addEventListener("popstate", () => {
+    const productId = productIdFromPath();
+    const params = new URLSearchParams(location.search);
+    state.view = productId ? "detail" : location.hash === "#admin" ? "admin" : location.hash === "#cart" ? "cart" : "catalog";
+    state.detailId = productId || null;
+    state.brand = params.get("brand") || "All";
+    state.category = params.get("category") || "All";
+    state.search = params.get("q") || "";
+    state.newArrivals = params.get("new") === "1";
+    render();
   });
 
   loadServerState().then(render);
