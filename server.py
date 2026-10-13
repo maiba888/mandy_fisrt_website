@@ -51,7 +51,7 @@ HTTPS_ENABLED = os.environ.get("HTTPS", "0") == "1"
 PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "https://bebeauty.top").rstrip("/")
 
 SEO_SITE_NAME = "BeBeauty Wholesale Catalog"
-ASSET_VERSION = "20260930-search"
+ASSET_VERSION = "20261013-archive"
 SEO_HOME_DESCRIPTION = (
     "Browse wholesale cosmetics and beauty products by brand, category, SKU, "
     "shade and price. Create an order number for supplier confirmation."
@@ -1617,6 +1617,9 @@ class CatalogHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         parsed = urlparse(self.path)
+        if parsed.path.startswith("/api/products/") and parsed.path.endswith("/restore"):
+            product_id = unquote(parsed.path[len("/api/products/"):-len("/restore")])
+            return self.require_admin(lambda: self.handle_product_restore(product_id))
         if parsed.path == "/api/login":
             return self.handle_login()
         if parsed.path == "/api/logout":
@@ -1898,8 +1901,10 @@ Use the cart on {PUBLIC_BASE_URL}/ to create an order number, then continue the 
         )
 
     def handle_products(self, query):
-        include_drafts = query.get("include_drafts", ["0"])[0] == "1" and bool(self.current_user())
-        where = "WHERE archived_at = 0" if include_drafts else "WHERE published = 1 AND archived_at = 0"
+        admin = bool(self.current_user())
+        include_drafts = query.get("include_drafts", ["0"])[0] == "1" and admin
+        include_archived = query.get("include_archived", ["0"])[0] == "1" and admin
+        where = "" if include_archived else ("WHERE archived_at = 0" if include_drafts else "WHERE published = 1 AND archived_at = 0")
         with connect() as conn:
             rows = conn.execute(f"SELECT * FROM products {where} ORDER BY sort_order ASC, brand, name").fetchall()
             best_sellers = best_seller_ids(conn)
@@ -1926,11 +1931,36 @@ Use the cart on {PUBLIC_BASE_URL}/ to create an order number, then continue the 
             data = read_json(self)
             data["id"] = product_id
             with connect() as conn:
+                existing = conn.execute("SELECT archived_at FROM products WHERE id = ?", (product_id,)).fetchone()
+                if not existing:
+                    return json_response(self, 404, {"error": "Product not found"})
+                # Editing an archive preserves its state; only explicit restore publishes it.
+                data["archived_at"] = existing["archived_at"]
+                if existing["archived_at"]:
+                    data["published"] = False
                 upsert_product(conn, data)
                 conn.commit()
             return json_response(self, 200, {"ok": True, "id": product_id})
         except ValueError as exc:
             return json_response(self, 400, {"error": str(exc)})
+
+    def handle_product_restore(self, product_id):
+        timestamp = now()
+        with connect() as conn:
+            cursor = conn.execute(
+                """UPDATE products SET archived_at = 0, published = 1, updated_at = ?,
+                   first_published_at = CASE WHEN first_published_at = 0 THEN ? ELSE first_published_at END
+                   WHERE id = ? AND archived_at > 0""",
+                (timestamp, timestamp, product_id),
+            )
+            if not cursor.rowcount:
+                existing = conn.execute("SELECT published FROM products WHERE id = ?", (product_id,)).fetchone()
+                if not existing:
+                    return json_response(self, 404, {"error": "Product not found"})
+                if not existing["published"]:
+                    return json_response(self, 409, {"error": "This product is a draft. Publish it from the editor."})
+            conn.commit()
+        return json_response(self, 200, {"ok": True, "id": product_id, "published": True})
 
     def handle_product_delete(self, product_id):
         with connect() as conn:

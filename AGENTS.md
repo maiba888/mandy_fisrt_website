@@ -114,6 +114,11 @@ easier.
   through WhatsApp.
 - Product deletion means archive. Never physically delete the database row from
   normal admin operations. Archived products disappear from active listings.
+- Authenticated admin listings can include archives via `include_archived=1`.
+  Keep Active, Drafts, Archived and All filters with search/pagination. Archived
+  products have an explicit Restore & publish action (`POST /api/products/<id>/restore`).
+  Editing an archive must retain its archived state. Restore preserves IDs,
+  images, options and first publication dates; anonymous queries never return archives.
 - Products with similar names, SKUs, sizes, or images are still independent
   rows. Never deduplicate products by name, SKU, brand, image, or description.
 - Required admin fields: SKU, Brand, Item, Price, Colors/shade options.

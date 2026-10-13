@@ -39,6 +39,8 @@
     adminLoginError: "",
     adminStatus: "",
     adminSearch: "",
+    adminProductStatus: "active",
+    adminProductFeedback: "",
     adminPage: 1,
     salesReport: null,
     salesReportLoading: false,
@@ -176,7 +178,7 @@
     state.loading = true;
     try {
       const [productPayload, mePayload, settingsPayload] = await Promise.all([
-        apiFetch("/api/products?include_drafts=1"),
+        apiFetch("/api/products?include_drafts=1&include_archived=1"),
         apiFetch("/api/me"),
         apiFetch("/api/settings"),
       ]);
@@ -194,7 +196,7 @@
   }
 
   async function refreshProducts() {
-    const payload = await apiFetch(`/api/products?include_drafts=${isAdminAuthed ? "1" : "0"}`);
+    const payload = await apiFetch(`/api/products?include_drafts=${isAdminAuthed ? "1" : "0"}&include_archived=${isAdminAuthed ? "1" : "0"}`);
     products = (payload.products || []).map(normalizeProduct);
   }
 
@@ -297,15 +299,15 @@
   }
 
   function brands() {
-    return ["All", ...Array.from(new Set(products.map((p) => p.brand).filter(Boolean))).sort()];
+    return ["All", ...Array.from(new Set(products.filter((p) => p.published !== false && !p.archived_at).map((p) => p.brand).filter(Boolean))).sort()];
   }
 
   function adminBrandOptions() {
-    return brands().filter((brand) => brand !== "All");
+    return Array.from(new Set(products.map((p) => p.brand).filter(Boolean))).sort();
   }
 
   function categories() {
-    return ["All", ...Array.from(new Set(products.map((p) => p.category).filter(Boolean))).sort()];
+    return ["All", ...Array.from(new Set(products.filter((p) => p.published !== false && !p.archived_at).map((p) => p.category).filter(Boolean))).sort()];
   }
 
   function filteredProducts() {
@@ -609,6 +611,7 @@
           </nav>
         </header>
         ${content}
+        ${state.view === "admin" && state.adminProductFeedback ? `<div class="admin-product-feedback" role="status">${escapeHTML(state.adminProductFeedback)}</div>` : ""}
         ${state.view === "catalog" || state.view === "detail" ? '<footer class="site-footer"><a href="/">Product catalog</a><a href="/ordering">Ordering &amp; delivery</a><a href="/sitemap.xml">Sitemap</a><span>Prices in USD. Availability confirmed by supplier.</span></footer>' : ""}
         ${cartFeedbackHTML()}
         ${quickAddModalHTML()}
@@ -941,7 +944,7 @@
             ${field("Colors / shade options", `<input name="colors" placeholder="Use / only, example: 1/2/3" required value="${escapeHTML((p.colors || []).join("/"))}">`)}
             ${imageManagerBlock(p)}
             ${field("Product information", `<textarea name="description" placeholder="Product information">${escapeHTML(p.description)}</textarea>`)}
-            <label class="check-field"><input type="checkbox" name="published" ${p.published !== false ? "checked" : ""}> Published</label>
+            ${p.archived_at ? '<p class="small">Archived product. Save changes keeps it archived. Use Restore &amp; publish to list it again.</p>' : `<label class="check-field"><input type="checkbox" name="published" ${p.published !== false ? "checked" : ""}> Published</label>`}
             <button class="primary" type="submit">${editing ? "Save changes" : "Add product"}</button>
             <div class="save-feedback" data-save-feedback aria-live="polite">${state.adminStatus ? escapeHTML(state.adminStatus) : ""}</div>
             ${editing ? `<button class="ghost" type="button" data-cancel-edit>Cancel edit</button>` : ""}
@@ -949,7 +952,10 @@
           </form>
           <section class="panel">
             <h3>${adminProducts.length} / ${products.length} products</h3>
-            ${field("Search products", `<input data-action="admin-search" placeholder="Search SKU, name, brand, category..." value="${escapeHTML(state.adminSearch)}">`)}
+            <div class="admin-catalog-filters">
+              ${field("Search products", `<input data-action="admin-search" placeholder="Search SKU, name, brand, category..." value="${escapeHTML(state.adminSearch)}">`)}
+              ${field("Product status", `<select data-action="admin-product-status">${[["active", "Active"], ["draft", "Drafts"], ["archived", "Archived"], ["all", "All products"]].map(([value, label]) => `<option value="${value}" ${state.adminProductStatus === value ? "selected" : ""}>${label}</option>`).join("")}</select>`)}
+            </div>
             ${adminPaginationHTML(adminProducts.length, pageStart, pageItems.length, adminTotalPages)}
             <div class="admin-list">${pageItems.map(adminRow).join("")}</div>
             ${adminPaginationHTML(adminProducts.length, pageStart, pageItems.length, adminTotalPages)}
@@ -960,8 +966,14 @@
 
   function filteredAdminProducts() {
     const query = state.adminSearch.trim().toLowerCase();
-    if (!query) return products;
-    return products.filter((product) =>
+    const list = products.filter((product) => {
+      if (state.adminProductStatus === "archived") return Boolean(product.archived_at);
+      if (state.adminProductStatus === "draft") return !product.archived_at && product.published === false;
+      if (state.adminProductStatus === "active") return !product.archived_at;
+      return true;
+    });
+    if (!query) return list;
+    return list.filter((product) =>
       [product.sku, product.brand, product.name, product.category, product.description]
         .join(" ")
         .toLowerCase()
@@ -1200,16 +1212,16 @@
     return `
       <div class="admin-row">
         <div class="thumb">${p.image ? `<img src="${escapeHTML(adminThumbSrc(p.image))}" alt="${escapeHTML(p.name)}" loading="lazy" decoding="async">` : escapeHTML(p.brand.slice(0, 2))}</div>
-        <div><strong>${escapeHTML(p.name)}</strong><div class="small">${escapeHTML(p.sku)} · ${escapeHTML(p.brand)} · ${p.published === false ? "Draft" : "Published"}</div></div>
+        <div><strong>${escapeHTML(p.name)}</strong><div class="small">${escapeHTML(p.sku)} · ${escapeHTML(p.brand)} · ${p.archived_at ? "Archived" : p.published === false ? "Draft" : "Published"}</div></div>
         <div>${money(p.price)}</div>
         <button class="ghost" data-edit="${escapeHTML(p.id)}">Edit</button>
-        <button class="ghost" data-delete="${escapeHTML(p.id)}">Archive</button>
+        ${p.archived_at ? `<button class="primary" data-restore="${escapeHTML(p.id)}">Restore &amp; publish</button>` : `<button class="ghost" data-delete="${escapeHTML(p.id)}">Archive</button>`}
       </div>`;
   }
 
   function addToCart(id, color = state.selectedColor || "Default", qty = state.qty || 1) {
     const p = products.find((item) => item.id === id);
-    if (!p) return;
+    if (!p || p.published === false || p.archived_at) return;
     const selected = color || "Default";
     const amount = Math.max(1, Number(qty || 1));
     const key = `${id}__${selected}`;
@@ -1393,6 +1405,22 @@
       state.editingId = target.dataset.edit;
       render();
     }
+    if (target.dataset.restore) {
+      if (!isAdminAuthed) return renderAdminLogin();
+      target.disabled = true;
+      try {
+        await apiFetch(`/api/products/${encodeURIComponent(target.dataset.restore)}/restore`, { method: "POST", body: "{}" });
+        await refreshProducts();
+        state.adminStatus = "Product restored and published.";
+        state.adminProductFeedback = state.adminStatus;
+        if (state.editingId === target.dataset.restore) state.editingId = null;
+        renderAdmin();
+      } catch (error) {
+        state.adminProductFeedback = error.message;
+        renderAdmin();
+      }
+      return;
+    }
     if (target.dataset.delete) {
       if (!isAdminAuthed) return renderAdminLogin();
       const archivedId = target.dataset.delete;
@@ -1402,6 +1430,7 @@
         if (state.editingId === archivedId) state.editingId = null;
         await refreshProducts();
         state.adminStatus = "Product archived.";
+        state.adminProductFeedback = state.adminStatus;
         renderAdmin();
       } catch (error) {
         state.adminStatus = error.message;
@@ -1432,6 +1461,7 @@
       const start = el.selectionStart ?? el.value.length;
       const end = el.selectionEnd ?? start;
       state.adminSearch = el.value;
+      state.adminProductFeedback = "";
       state.adminPage = 1;
       renderAdmin();
       refocusControl('[data-action="admin-search"]', start, end);
@@ -1447,6 +1477,13 @@
 
   document.addEventListener("change", async (event) => {
     const el = event.target;
+    if (el.dataset.action === "admin-product-status") {
+      state.adminProductStatus = el.value;
+      state.adminPage = 1;
+      state.adminProductFeedback = "";
+      renderAdmin();
+      return;
+    }
     if (el.dataset.action === "brand") {
       state.brand = el.value;
       updateCatalogUrl();
