@@ -41,6 +41,14 @@
     adminSearch: "",
     adminProductStatus: "active",
     adminProductFeedback: "",
+    adminMenu: "catalog",
+    factoryFiles: [],
+    factoryReports: [],
+    factoryErrors: [],
+    factoryToken: "",
+    factorySummary: null,
+    factoryBusy: false,
+    factoryStatus: "",
     adminPage: 1,
     salesReport: null,
     salesReportLoading: false,
@@ -896,6 +904,7 @@
 
   function renderAdmin() {
     if (!isAdminAuthed) return renderAdminLogin();
+    if (state.adminMenu === "factory") return renderFactoryOrders();
     if (!state.salesReportRequested) window.setTimeout(loadSalesReport, 0);
     const editing = products.find((p) => p.id === state.editingId) || null;
     const p = editing || { sku: "", brand: "", name: "", category: "Cosmetics", price: "", stock: "", weight: "", description: "", colors: [], image: "", images: [], published: true };
@@ -908,6 +917,7 @@
     layout(`
       <main class="admin">
         <div class="section-title"><div><h2>Catalog admin</h2><p>Edit products, publish products, and manage product images.</p></div><button class="ghost" data-logout-admin>Logout</button></div>
+        ${adminMenuHTML()}
         <div class="notice">${apiOnline ? "Admin changes are saved to the SQLite database on the server." : "Server API is unavailable; admin saving is disabled until the backend is running."}</div>
         ${state.adminStatus ? `<div class="notice">${escapeHTML(state.adminStatus)}</div>` : ""}
         <section class="panel order-download-panel">
@@ -962,6 +972,97 @@
           </section>
         </div>
       </main>`);
+  }
+
+  function adminMenuHTML() {
+    return `<nav class="admin-menu" aria-label="Admin sections"><button type="button" class="${state.adminMenu === "catalog" ? "primary" : "ghost"}" data-admin-menu="catalog">Products &amp; orders</button><button type="button" class="${state.adminMenu === "factory" ? "primary" : "ghost"}" data-admin-menu="factory">Factory orders</button></nav>`;
+  }
+
+  function resetFactoryValidation() {
+    state.factoryReports = [];
+    state.factoryErrors = [];
+    state.factoryToken = "";
+    state.factorySummary = null;
+    state.factoryStatus = "";
+  }
+
+  function renderFactoryOrders() {
+    if (!isAdminAuthed) return renderAdminLogin();
+    layout(`<main class="admin factory-page">
+      <div class="section-title"><h2>Factory order summary</h2><button class="ghost" data-logout-admin>Logout</button></div>
+      ${adminMenuHTML()}
+      <label class="factory-upload-label">Customer order Excel files (.xlsx)<input type="file" accept=".xlsx" multiple data-factory-files ${state.factoryBusy ? "disabled" : ""}></label>
+      <ul class="factory-file-list">${state.factoryFiles.map((file, index) => {
+        const report = state.factoryReports[index];
+        return `<li><span>${escapeHTML(file.name)}</span><small>${(file.size / 1024 / 1024).toFixed(1)} MB${report ? ` · ${report.errors.length ? "Needs correction" : "Passed"}` : ""}</small><button type="button" class="ghost" data-factory-remove="${index}" aria-label="Remove ${escapeHTML(file.name)}" ${state.factoryBusy ? "disabled" : ""}>Remove</button></li>`;
+      }).join("")}</ul>
+      <div class="factory-actions"><button class="primary" data-factory-validate ${!state.factoryFiles.length || state.factoryBusy ? "disabled" : ""}>Upload &amp; validate all</button><button class="primary" data-factory-merge ${!state.factoryToken || state.factoryBusy ? "disabled" : ""}>Merge &amp; download</button><button class="ghost" data-factory-clear ${state.factoryBusy ? "disabled" : ""}>Clear files</button></div>
+      <p class="factory-status" role="status">${escapeHTML(state.factoryStatus)}</p>
+      ${state.factorySummary ? `<p>${state.factorySummary.files} files · ${state.factorySummary.source_rows} source product rows · ${state.factorySummary.factory_rows} factory rows · ${state.factorySummary.quantity} pieces</p>` : ""}
+      ${state.factoryErrors.length ? `<h3>${state.factoryErrors.length} issues to correct</h3><div class="factory-errors"><table><thead><tr><th>File</th><th>Sheet</th><th>Row</th><th>Field</th><th>Reason</th></tr></thead><tbody>${state.factoryErrors.map(error => `<tr><td>${escapeHTML(error.filename)}</td><td>${escapeHTML(error.sheet || "")}</td><td>${error.row ?? ""}</td><td>${escapeHTML(error.field || "")}</td><td>${escapeHTML(error.reason)}</td></tr>`).join("")}</tbody></table></div>` : ""}
+    </main>`);
+  }
+
+  async function validateFactoryOrders() {
+    if (!isAdminAuthed || state.factoryBusy || !state.factoryFiles.length) return;
+    resetFactoryValidation();
+    state.factoryBusy = true;
+    state.factoryStatus = "Uploading and checking all selected files...";
+    renderFactoryOrders();
+    try {
+      const errors = [];
+      if (state.factoryFiles.length > 20) errors.push({ filename: "Batch", reason: "Select no more than 20 files." });
+      if (state.factoryFiles.reduce((size, file) => size + file.size, 0) > 180 * 1024 * 1024) errors.push({ filename: "Batch", reason: "Combined upload exceeds 180 MB." });
+      if (errors.length) {
+        state.factoryErrors = errors;
+        state.factoryStatus = "Correct all listed issues, then select the corrected files and validate again.";
+        return;
+      }
+      const form = new FormData();
+      for (const file of state.factoryFiles) form.append("files", file, file.name);
+      const response = await fetch("/api/admin/factory-orders/validate", { method: "POST", credentials: "same-origin", cache: "no-store", body: form });
+      const result = await response.json();
+      state.factoryReports = result.files || [];
+      state.factoryErrors = result.errors || [];
+      if (response.status === 422) {
+        state.factoryStatus = "Correct all listed issues, remove the old files, then upload the corrected files and validate again.";
+      } else if (!response.ok) {
+        throw new Error(result.error || "Upload failed. Please try again.");
+      } else {
+        state.factoryToken = result.batch_token;
+        state.factorySummary = result.summary;
+        state.factoryStatus = "All files passed. Ready to merge within 2 hours.";
+      }
+    } catch (error) {
+      state.factoryStatus = error.message;
+    } finally {
+      state.factoryBusy = false;
+      if (state.view === "admin" && state.adminMenu === "factory") renderFactoryOrders();
+    }
+  }
+
+  async function mergeFactoryOrders() {
+    if (!isAdminAuthed || !state.factoryToken || state.factoryBusy) return;
+    state.factoryBusy = true;
+    state.factoryStatus = "Generating factory order...";
+    renderFactoryOrders();
+    try {
+      const blob = await apiBlob("/api/admin/factory-orders/merge", { batch_token: state.factoryToken });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = `factory-order-${new Date().toISOString().replace(/[-:]/g, "").slice(0, 15)}.xlsx`;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 60000);
+      state.factoryStatus = "Factory order downloaded. Sheet 2 lists the source filenames.";
+    } catch (error) {
+      state.factoryStatus = error.message;
+    } finally {
+      state.factoryBusy = false;
+      if (state.view === "admin" && state.adminMenu === "factory") renderFactoryOrders();
+    }
   }
 
   function filteredAdminProducts() {
@@ -1241,6 +1342,25 @@
   document.addEventListener("click", async (event) => {
     const target = event.target.closest("button, a[data-detail], a[data-filter-brand], a[data-filter-category], .brand, [data-quick-backdrop]");
     if (!target) return;
+    if (target.dataset.adminMenu) {
+      state.adminMenu = target.dataset.adminMenu;
+      renderAdmin();
+      return;
+    }
+    if (target.dataset.factoryRemove !== undefined && !state.factoryBusy) {
+      state.factoryFiles.splice(Number(target.dataset.factoryRemove), 1);
+      resetFactoryValidation();
+      renderFactoryOrders();
+      return;
+    }
+    if (target.hasAttribute("data-factory-validate")) return validateFactoryOrders();
+    if (target.hasAttribute("data-factory-merge")) return mergeFactoryOrders();
+    if (target.hasAttribute("data-factory-clear") && !state.factoryBusy) {
+      state.factoryFiles = [];
+      resetFactoryValidation();
+      renderFactoryOrders();
+      return;
+    }
     if (target.tagName === "A") {
       if (event.ctrlKey || event.metaKey || event.shiftKey || event.altKey || event.button !== 0) return;
       event.preventDefault();
@@ -1394,6 +1514,9 @@
         await apiFetch("/api/logout", { method: "POST", body: "{}" });
       } catch {}
       isAdminAuthed = false;
+      state.factoryFiles = [];
+      resetFactoryValidation();
+      state.adminMenu = "catalog";
       state.editingId = null;
       state.adminStatus = "";
       state.salesReport = null;
@@ -1477,6 +1600,12 @@
 
   document.addEventListener("change", async (event) => {
     const el = event.target;
+    if (el.hasAttribute("data-factory-files") && !state.factoryBusy) {
+      state.factoryFiles.push(...Array.from(el.files || []));
+      resetFactoryValidation();
+      renderFactoryOrders();
+      return;
+    }
     if (el.dataset.action === "admin-product-status") {
       state.adminProductStatus = el.value;
       state.adminPage = 1;

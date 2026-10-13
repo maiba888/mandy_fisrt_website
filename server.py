@@ -14,6 +14,9 @@ import sqlite3
 import threading
 import time
 import re
+from email import policy
+from email.parser import BytesParser
+import factory_orders
 from http import cookies
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -51,7 +54,8 @@ HTTPS_ENABLED = os.environ.get("HTTPS", "0") == "1"
 PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "https://bebeauty.top").rstrip("/")
 
 SEO_SITE_NAME = "BeBeauty Wholesale Catalog"
-ASSET_VERSION = "20261013-archive"
+ASSET_VERSION = "20261013-factory"
+FACTORY_UPLOAD_LOCK = threading.Lock()
 SEO_HOME_DESCRIPTION = (
     "Browse wholesale cosmetics and beauty products by brand, category, SKU, "
     "shade and price. Create an order number for supplier confirmation."
@@ -127,6 +131,7 @@ def binary_response(handler, status, data, content_type, filename=None):
     handler.send_response(status)
     handler.send_header("Content-Type", content_type)
     handler.send_header("Content-Length", str(len(data)))
+    handler.send_header("Cache-Control", "no-store")
     if filename:
         handler.send_header("Content-Disposition", f'attachment; filename="{filename}"')
     handler.end_headers()
@@ -1617,6 +1622,10 @@ class CatalogHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         parsed = urlparse(self.path)
+        if parsed.path == "/api/admin/factory-orders/validate":
+            return self.require_admin(self.handle_factory_validate)
+        if parsed.path == "/api/admin/factory-orders/merge":
+            return self.require_admin(self.handle_factory_merge)
         if parsed.path.startswith("/api/products/") and parsed.path.endswith("/restore"):
             product_id = unquote(parsed.path[len("/api/products/"):-len("/restore")])
             return self.require_admin(lambda: self.handle_product_restore(product_id))
@@ -1943,6 +1952,54 @@ Use the cart on {PUBLIC_BASE_URL}/ to create an order number, then continue the 
             return json_response(self, 200, {"ok": True, "id": product_id})
         except ValueError as exc:
             return json_response(self, 400, {"error": str(exc)})
+
+    def handle_factory_validate(self):
+        if not FACTORY_UPLOAD_LOCK.acquire(blocking=False):
+            return json_response(self, 409, {"error": "Another order batch is being checked. Please try again shortly."})
+        try:
+            length = int(self.headers.get('Content-Length', '0'))
+            if length <= 0 or length > factory_orders.MAX_BATCH_BYTES:
+                return json_response(self, 413, {"error": "Select order files with a combined size under 180 MB."})
+            content_type = self.headers.get('Content-Type', '')
+            if not content_type.lower().startswith('multipart/form-data') or '\r' in content_type or '\n' in content_type:
+                raise ValueError('Upload the customer Excel files using the file selector.')
+            # MIME parsing preserves binary XLSX bytes, including trailing CR/LF bytes.
+            message = BytesParser(policy=policy.default).parsebytes(
+                ('Content-Type: ' + content_type + '\r\nMIME-Version: 1.0\r\n\r\n').encode() + self.rfile.read(length))
+            if not message.is_multipart():
+                raise ValueError('Cannot read the uploaded file batch. Please select the files again.')
+            files = [{'filename': Path(part.get_filename().replace('\\', '/')).name,
+                      'data': part.get_payload(decode=True) or b''}
+                     for part in message.iter_parts() if part.get_filename() is not None]
+            if not files or len(files) > factory_orders.MAX_FILES:
+                raise ValueError('Select between 1 and 20 customer order Excel files.')
+            reports, errors, lines = factory_orders.validate_factory_files(files)
+            if errors:
+                return json_response(self, 422, {'ok': False, 'files': reports, 'errors': errors})
+            token, rows = factory_orders.store_factory_batch(self.current_user(), reports, lines)
+            return json_response(self, 200, {'ok': True, 'batch_token': token, 'files': reports,
+                'errors': [], 'summary': {'files': len(files), 'source_rows': sum(r['item_rows'] for r in reports),
+                    'factory_rows': rows, 'quantity': sum(r['quantity'] for r in reports)}})
+        except ValueError as exc:
+            return json_response(self, 400, {'error': str(exc)})
+        except Exception:
+            logger.exception('Factory order validation failed')
+            return json_response(self, 500, {'error': 'Unable to check the batch. Please try again.'})
+        finally:
+            FACTORY_UPLOAD_LOCK.release()
+
+    def handle_factory_merge(self):
+        try:
+            data = read_json_limited(self, 4096)
+            workbook = factory_orders.build_factory_workbook(data.get('batch_token', ''), self.current_user())
+            return binary_response(self, 200, workbook,
+                'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                'factory-order-' + time.strftime('%Y%m%d-%H%M%S') + '.xlsx')
+        except ValueError as exc:
+            return json_response(self, 400, {'error': str(exc)})
+        except Exception:
+            logger.exception('Factory order workbook generation failed')
+            return json_response(self, 500, {'error': 'Unable to generate the factory order. Please upload and validate again.'})
 
     def handle_product_restore(self, product_id):
         timestamp = now()

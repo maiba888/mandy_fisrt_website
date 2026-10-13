@@ -102,6 +102,18 @@ easier.
 - Catalog Excel import/export has been retired. Do not restore catalog import,
   catalog export, reset-from-Excel, or bulk replacement endpoints/UI.
 - Order Excel download must remain available to authenticated administrators.
+- Factory orders is a separate authenticated admin menu for adjusted customer
+  workbooks. It never imports catalog data or changes original orders. Validate
+  every file/row in a batch and return all errors with filename/sheet/row/reason.
+  No partial batch may be merged. Read headers by name within the first 25 rows;
+  use Informations shade quantities and verify their sum against QTY. Preserve
+  leading zeros, spaces and hyphens in shades. Group by exact trimmed Brand +
+  Item Name + Shade + numeric Unit Price; different prices remain separate.
+  Export one row per shade, with Product, Picture, Color/Type, QTY and Unit Price;
+  Sheet2 lists source filenames only. Use Arial and proportional workbook images.
+  Validated batches live in private temporary storage for 2 hours, owned by the
+  authenticated admin, and never enter Git or product replication. Limits: 20
+  files, 50 MB per file, 180 MB total. Run `python -m scripts.test_factory_orders`.
 - The admin sales report shows the top 20 products by cumulative quantity in
   submitted orders and supports an authenticated all-products Excel export.
   The export includes unsold products with zero values and keeps `Units Sold`
