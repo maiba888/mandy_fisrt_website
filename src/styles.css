@@ -301,6 +301,7 @@ button { cursor: pointer; }
 }
 .gallery-thumb.active { border-color: var(--accent-strong); box-shadow: 0 0 0 2px rgba(126,61,53,.12); }
 .detail h1 { font-family: Arial, sans-serif; font-size: clamp(34px, 5vw, 60px); line-height: 1; margin: 0 0 16px; }
+.detail h1, .product-info-text p { overflow-wrap: anywhere; }
 .detail-panel { background: #fff; border: 1px solid var(--line); border-radius: 8px; padding: 20px; margin-top: 20px; }
 .product-info-text { background: #fff; border: 1px solid var(--line); border-radius: 8px; padding: 18px; margin-top: 18px; }
 .product-info-text h3 { margin: 0 0 10px; }
