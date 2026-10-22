@@ -1,13 +1,30 @@
 (function () {
   const CART_KEY = "luxe-trade-cart";
   const ADMIN_PAGE_SIZE = 80;
+  const SITE_NAME = "BeBeauty Wholesale Catalog";
+  const PUBLIC_ORIGIN = "https://bebeauty.top";
+  const HOME_DESCRIPTION = "Browse wholesale cosmetics and beauty products by brand, category, SKU, shade and price. Create an order number for supplier confirmation.";
+
+  function productIdFromPath() {
+    const match = location.pathname.match(/^\/product\/(.+?)\/?$/);
+    if (!match) return "";
+    try {
+      return decodeURIComponent(match[1]);
+    } catch {
+      return "";
+    }
+  }
+
+  const initialProductId = productIdFromPath();
+  const initialParams = new URLSearchParams(location.search);
 
   const state = {
-    view: location.hash === "#admin" ? "admin" : location.hash === "#cart" ? "cart" : "catalog",
-    detailId: null,
-    search: "",
-    brand: "All",
-    category: "All",
+    view: initialProductId ? "detail" : location.hash === "#admin" ? "admin" : location.hash === "#cart" ? "cart" : "catalog",
+    detailId: initialProductId || null,
+    search: initialParams.get("q") || "",
+    brand: initialParams.get("brand") || "All",
+    category: initialParams.get("category") || "All",
+    newArrivals: initialParams.get("new") === "1",
     sort: "featured",
     editingId: null,
     selectedColor: "",
@@ -22,7 +39,21 @@
     adminLoginError: "",
     adminStatus: "",
     adminSearch: "",
+    adminProductStatus: "active",
+    adminProductFeedback: "",
+    adminMenu: "catalog",
+    factoryFiles: [],
+    factoryReports: [],
+    factoryErrors: [],
+    factoryToken: "",
+    factorySummary: null,
+    factoryBusy: false,
+    factoryStatus: "",
     adminPage: 1,
+    salesReport: null,
+    salesReportLoading: false,
+    salesReportError: "",
+    salesReportRequested: false,
     loading: true,
   };
 
@@ -34,11 +65,11 @@
   let apiOnline = false;
 
   const PRODUCT_QA = [
-    ["Are these items authentic makeup?", "No, these items copied items."],
-    ["If all products are scannable on the application Sephora?", "Sorry, since these items are copied items, and we do not have Sephora system here, we do not assure all these items are scannable on the application Sephora."],
-    ["How does the order process work?", "1. Please add the items, colors and qty you need into the cart, then press Create order & Contact Supplier. 2. After all details are agreed by both of us, we will create order and send you payment link on Alibaba. WE DEAL ON ALIBABA. 3. We send goods to you after you paid on Alibaba."],
-    ["How long is the delivery?", "Usually, goods will be sent out to forwarder within 3 working days after payment received, then you can get the parcel within 12-15 days after the forwarder sent out."],
-    ["What should we do if the goods broken during transportation?", "We can send the replacement with your next order or refund the cost of the broken items to you."],
+    ["Are these products authentic?", "No. These are replica products and are not sold as authentic branded goods."],
+    ["Can every product be scanned in the Sephora app?", "No. Sephora app scanning is not guaranteed for these products."],
+    ["How does the order process work?", "Add products, shades and quantities to the cart, create an order number, then confirm availability and the Alibaba payment link through WhatsApp."],
+    ["How long does delivery take?", "Goods are normally sent to the forwarder within three working days after payment. Forwarder delivery is usually 12 to 15 days."],
+    ["What happens if goods are damaged during transportation?", "A replacement can be sent with the next order or the damaged item cost can be refunded after confirmation."],
   ];
 
   function readJSON(key, fallback) {
@@ -155,7 +186,7 @@
     state.loading = true;
     try {
       const [productPayload, mePayload, settingsPayload] = await Promise.all([
-        apiFetch("/api/products?include_drafts=1"),
+        apiFetch("/api/products?include_drafts=1&include_archived=1"),
         apiFetch("/api/me"),
         apiFetch("/api/settings"),
       ]);
@@ -173,19 +204,32 @@
   }
 
   async function refreshProducts() {
-    const payload = await apiFetch(`/api/products?include_drafts=${isAdminAuthed ? "1" : "0"}`);
+    const payload = await apiFetch(`/api/products?include_drafts=${isAdminAuthed ? "1" : "0"}&include_archived=${isAdminAuthed ? "1" : "0"}`);
     products = (payload.products || []).map(normalizeProduct);
+  }
+
+  async function loadSalesReport() {
+    if (!isAdminAuthed || state.salesReportLoading || state.salesReportRequested) return;
+    state.salesReportRequested = true;
+    state.salesReportLoading = true;
+    state.salesReportError = "";
+    try {
+      state.salesReport = await apiFetch("/api/admin/sales-report");
+    } catch (error) {
+      state.salesReport = null;
+      state.salesReportError = error.message;
+    } finally {
+      state.salesReportLoading = false;
+      if (state.view === "admin" && isAdminAuthed) renderAdmin();
+    }
   }
 
   function cleanColorList(items) {
     const cleaned = (items || [])
       .flatMap((item) => splitColorText(item))
       .map((item) => String(item || "").trim())
-      .map((item) => item.replace(/^colou?rs?\s*[:：]/i, "").replace(/^[#/\-\s]+|[#/\-\s]+$/g, ""))
-      .filter(Boolean)
-      .filter((item) => !/(?:size|gross|net|weight|cm|\*)/i.test(item))
-      .filter((item) => !/^\d+(?:\.\d+)?g$/i.test(item));
-    return Array.from(new Set(cleaned)).slice(0, 18);
+      .filter(Boolean);
+    return Array.from(new Set(cleaned));
   }
 
   function splitColorText(value) {
@@ -195,18 +239,26 @@
   }
 
   function extractColorOptions(info, fallback = []) {
+    const fallbackColors = cleanColorList(fallback);
+    if (fallbackColors.length) return fallbackColors;
     const text = String(info || "");
     const match = text.match(/colou?rs?\s*[:：]\s*(.*)/i);
-    if (!match) return cleanColorList(fallback);
+    if (!match) return [];
     const raw = match[1]
       .split(/\s+(?:size|gross\s*weight|gross|net\s*(?:weight|wet|wight)|weight)\s*[:：]?/i)[0];
     const parsed = cleanColorList(raw.split("/"));
-    return parsed.length ? parsed : cleanColorList(fallback);
+    return parsed;
+  }
+
+  function normalizeAssetUrl(value) {
+    const url = String(value || "").trim().replace(/\\/g, "/");
+    if (!url || /^(?:https?:|data:|blob:)/i.test(url) || url.startsWith("/")) return url;
+    return `/${url.replace(/^\.\//, "").replace(/^\/+/, "")}`;
   }
 
   function normalizeProduct(product) {
-    const images = cleanImageList(product.images || []);
-    const image = String(product.image || images[0] || "").trim();
+    const images = cleanImageList(product.images || []).map(normalizeAssetUrl);
+    const image = normalizeAssetUrl(product.image || images[0] || "");
     if (image && !images.includes(image)) images.unshift(image);
     return {
       ...product,
@@ -252,20 +304,21 @@
   }
 
   function brands() {
-    return ["All", ...Array.from(new Set(products.map((p) => p.brand).filter(Boolean))).sort()];
+    return ["All", ...Array.from(new Set(products.filter((p) => p.published !== false && !p.archived_at).map((p) => p.brand).filter(Boolean))).sort()];
   }
 
   function adminBrandOptions() {
-    return brands().filter((brand) => brand !== "All");
+    return Array.from(new Set(products.map((p) => p.brand).filter(Boolean))).sort();
   }
 
   function categories() {
-    return ["All", ...Array.from(new Set(products.map((p) => p.category).filter(Boolean))).sort()];
+    return ["All", ...Array.from(new Set(products.filter((p) => p.published !== false && !p.archived_at).map((p) => p.category).filter(Boolean))).sort()];
   }
 
   function filteredProducts() {
     const q = state.search.trim().toLowerCase();
     let list = products.filter((p) => p.published !== false);
+    if (state.newArrivals) list = list.filter((p) => p.is_new_arrival);
     if (q) list = list.filter((p) => [p.sku, p.brand, p.name, p.description, p.category].join(" ").toLowerCase().includes(q));
     if (state.brand !== "All") list = list.filter((p) => p.brand === state.brand);
     if (state.category !== "All") list = list.filter((p) => p.category === state.category);
@@ -293,8 +346,14 @@
     });
   }
 
-  function shippingCost(country, totalWeight) {
-    const kg = Math.max(0, Number(totalWeight || 0));
+  function billableShippingWeight(country, productWeight) {
+    const kg = Math.max(0, Number(productWeight || 0));
+    if (country !== "Europe" || kg <= 6) return kg;
+    return Math.ceil((kg + 2 - Number.EPSILON) * 2) / 2;
+  }
+
+  function shippingCost(country, billableWeight) {
+    const kg = Math.max(0, Number(billableWeight || 0));
     if (country === "United States") {
       if (kg <= 0.7) return 48.8;
       if (kg <= 1.2) return 65.4;
@@ -305,22 +364,23 @@
       if (kg <= 15) return kg * 19.3;
       return kg * 17.3;
     }
-    if (kg <= 0.7) return 29.8;
-    if (kg <= 1.2) return 35.2;
+    if (kg <= 0.7) return 31.2;
+    if (kg <= 1.5) return 35.2;
     if (kg <= 2) return 43.8;
-    if (kg <= 3) return 49.8;
-    if (kg <= 4) return 59.5;
-    if (kg <= 5) return 71.6;
-    if (kg <= 15) return kg * 10.3;
-    return kg * 9.85;
+    if (kg <= 3) return 52.3;
+    if (kg <= 4) return 61.8;
+    if (kg <= 5) return 72.3;
+    if (kg <= 6) return 81.4;
+    return kg * 10.8;
   }
 
   function cartTotals() {
     const lines = cartLines();
     const productTotal = lines.reduce((sum, item) => sum + item.qty * item.price, 0);
     const totalWeight = lines.reduce((sum, item) => sum + item.qty * Number(item.weight || 0), 0);
-    const shipping = lines.length ? shippingCost(state.shippingCountry, totalWeight) : 0;
-    return { lines, productTotal, totalWeight, shipping, total: productTotal + shipping };
+    const shippingWeight = lines.length ? billableShippingWeight(state.shippingCountry, totalWeight) : 0;
+    const shipping = lines.length ? shippingCost(state.shippingCountry, shippingWeight) : 0;
+    return { lines, productTotal, totalWeight, shippingWeight, shipping, total: productTotal + shipping };
   }
 
   function shadeOptions(product) {
@@ -363,6 +423,7 @@
 
   function activeFilterChips() {
     const chips = [];
+    if (state.newArrivals) chips.push({ label: "New arrivals", key: "new" });
     if (state.search.trim()) chips.push({ label: `Search: ${state.search.trim()}`, key: "search" });
     if (state.brand !== "All") chips.push({ label: `Brand: ${state.brand}`, key: "brand" });
     if (state.category !== "All") chips.push({ label: `Category: ${state.category}`, key: "category" });
@@ -420,12 +481,112 @@
     return `<div class="bottle" data-brand="${escapeHTML(product.brand)}"></div>`;
   }
 
-  function openDetail(id) {
+  function productPath(id) {
+    return `/product/${encodeURIComponent(id)}`;
+  }
+
+  function setMeta(selector, attribute, value) {
+    let element = document.head.querySelector(selector);
+    if (!element) {
+      element = document.createElement("meta");
+      const propertyMatch = selector.match(/^meta\[property="([^"]+)"\]$/);
+      const nameMatch = selector.match(/^meta\[name="([^"]+)"\]$/);
+      if (propertyMatch) element.setAttribute("property", propertyMatch[1]);
+      if (nameMatch) element.setAttribute("name", nameMatch[1]);
+      document.head.appendChild(element);
+    }
+    element.setAttribute(attribute, value);
+  }
+
+  function setCanonical(url) {
+    let canonical = document.head.querySelector('link[rel="canonical"]');
+    if (!canonical) {
+      canonical = document.createElement("link");
+      canonical.rel = "canonical";
+      document.head.appendChild(canonical);
+    }
+    canonical.href = url;
+  }
+
+  function metadataDescription(product) {
+    const identity = `${product.name} by ${product.brand}, SKU ${product.sku}.`;
+    const description = String(product.description || "").replace(/\s+/g, " ").trim();
+    return `${identity} ${description} Wholesale beauty catalog with shade selection and order-number confirmation.`
+      .slice(0, 158)
+      .replace(/[\s,.;]+$/, "") + ".";
+  }
+
+  function updatePageMetadata() {
+    const product = state.view === "detail" ? products.find((item) => item.id === state.detailId && item.published !== false && !item.archived_at) : null;
+    const privateView = state.view === "admin" || state.view === "cart";
+    const filters = [["brand", state.brand], ["category", state.category]].filter(([, value]) => value !== "All");
+    const extraParams = [...new URLSearchParams(location.search).keys()].some((key) => !["brand", "category"].includes(key));
+    const collection = state.view === "catalog" && filters.length === 1 && !state.search && !state.newArrivals && !extraParams;
+    const filteredView = state.view === "catalog" && (filters.length > 1 || state.search || state.newArrivals || extraParams);
+    const heading = collection ? `${filters[0][1]} Wholesale Beauty Products` : "Wholesale Beauty Products";
+    const missingProduct = state.view === "detail" && !product;
+    const title = product ? `${product.name} Wholesale | BeBeauty` : missingProduct ? "Product not found | BeBeauty" : `${heading} | BeBeauty`;
+    const description = product ? metadataDescription(product) : collection ? `Browse ${filters[0][1]} wholesale beauty products, USD prices, shade options and product images. Confirm availability with the supplier before payment.` : HOME_DESCRIPTION;
+    const canonical = product ? new URL(productPath(product.id), PUBLIC_ORIGIN).href : collection ? new URL(collectionPath(...filters[0]), PUBLIC_ORIGIN).href : `${PUBLIC_ORIGIN}/`;
+    document.title = title;
+    setCanonical(canonical);
+    document.head.querySelectorAll('link[rel="alternate"][hreflang]').forEach((link) => { link.href = canonical; });
+    setMeta('meta[name="description"]', "content", description);
+    setMeta('meta[name="robots"]', "content", privateView || missingProduct ? "noindex,nofollow" : filteredView ? "noindex,follow" : "index,follow,max-image-preview:large,max-snippet:-1");
+    setMeta('meta[property="og:site_name"]', "content", SITE_NAME);
+    setMeta('meta[property="og:type"]', "content", product ? "product" : "website");
+    setMeta('meta[property="og:title"]', "content", title);
+    setMeta('meta[property="og:description"]', "content", description);
+    setMeta('meta[property="og:url"]', "content", canonical);
+    const image = product?.image ? new URL(product.image.replace(/^\.\//, "/"), PUBLIC_ORIGIN).href : "";
+    if (image) setMeta('meta[property="og:image"]', "content", image);
+    else document.head.querySelector('meta[property="og:image"]')?.remove();
+    setMeta('meta[name="twitter:card"]', "content", image ? "summary_large_image" : "summary");
+    const organization = { "@type": "Organization", "@id": `${PUBLIC_ORIGIN}/#organization`, name: SITE_NAME, alternateName: "Luxe Trade Catalog", url: `${PUBLIC_ORIGIN}/` };
+    const graph = [organization, { "@type": "WebSite", "@id": `${PUBLIC_ORIGIN}/#website`, name: SITE_NAME, url: `${PUBLIC_ORIGIN}/`, publisher: { "@id": organization["@id"] } }];
+    if (product) {
+      graph.push({ "@type": "Product", "@id": `${canonical}#product`, name: product.name, sku: product.sku, category: product.category, description, url: canonical,
+        brand: { "@type": "Brand", name: product.brand }, ...(image ? { image: productImages(product).map((value) => new URL(value, PUBLIC_ORIGIN).href) } : {}),
+        offers: { "@type": "Offer", url: canonical, priceCurrency: "USD", price: Number(product.price).toFixed(2), seller: { "@id": organization["@id"] } } });
+      graph.push({ "@type": "BreadcrumbList", itemListElement: [["Wholesale beauty products", `${PUBLIC_ORIGIN}/`], [product.brand, new URL(collectionPath("brand", product.brand), PUBLIC_ORIGIN).href], [product.name, canonical]].map(([name, item], index) => ({ "@type": "ListItem", position: index + 1, name, item })) });
+    } else if (!privateView && !missingProduct) {
+      const list = filteredProducts();
+      graph.push({ "@type": "CollectionPage", name: heading, description, url: canonical, isPartOf: { "@id": `${PUBLIC_ORIGIN}/#website` }, mainEntity: { "@type": "ItemList", numberOfItems: list.length, itemListElement: list.map((item, index) => ({ "@type": "ListItem", position: index + 1, name: item.name, url: new URL(productPath(item.id), PUBLIC_ORIGIN).href })) } });
+    }
+    if (!privateView && !missingProduct) graph.push({ "@type": "FAQPage", mainEntity: PRODUCT_QA.map(([name, text]) => ({ "@type": "Question", name, acceptedAnswer: { "@type": "Answer", text } })) });
+    // Replace server metadata when SPA navigation changes the visible page.
+    document.head.querySelectorAll('script[type="application/ld+json"]').forEach((script) => script.remove());
+    if (!privateView && !missingProduct) {
+      const script = document.createElement("script");
+      script.type = "application/ld+json";
+      script.textContent = JSON.stringify({ "@context": "https://schema.org", "@graph": graph });
+      document.head.appendChild(script);
+    }
+  }
+
+  function collectionPath(field, value) {
+    return `/?${new URLSearchParams({ [field]: value })}`;
+  }
+
+  function updateCatalogUrl(replace = false) {
+    const params = new URLSearchParams();
+    if (state.newArrivals) params.set("new", "1");
+    if (state.brand !== "All") params.set("brand", state.brand);
+    if (state.category !== "All") params.set("category", state.category);
+    if (state.search) params.set("q", state.search);
+    const query = params.toString();
+    history[replace ? "replaceState" : "pushState"]({ view: "catalog" }, "", query ? `/?${query}` : "/");
+  }
+
+  function openDetail(id, pushHistory = true) {
     state.view = "detail";
     state.detailId = id;
     state.qty = 1;
     state.selectedColor = "";
     state.selectedImage = "";
+    if (pushHistory && location.pathname !== productPath(id)) {
+      history.pushState({ view: "detail", id }, "", productPath(id));
+    }
     render();
     window.setTimeout(() => {
       document.documentElement.scrollTop = 0;
@@ -447,7 +608,7 @@
     document.getElementById("app").innerHTML = `
       <div class="app">
         <header class="topbar">
-          <div class="brand" role="button" data-view="catalog"><span class="brand-mark">L</span><span>Luxe Trade Catalog</span></div>
+          <a class="brand" href="/" data-view="catalog"><span class="brand-mark">L</span><span>Luxe Trade Catalog</span></a>
           <nav class="nav">
             <button class="${state.view === "catalog" ? "active" : ""}" data-view="catalog">Products</button>
             <button class="${state.view === "admin" ? "active" : ""}" data-view="admin">Admin</button>
@@ -455,6 +616,8 @@
           </nav>
         </header>
         ${content}
+        ${state.view === "admin" && state.adminProductFeedback ? `<div class="admin-product-feedback" role="status">${escapeHTML(state.adminProductFeedback)}</div>` : ""}
+        ${state.view === "catalog" || state.view === "detail" ? '<footer class="site-footer"><a href="/">Product catalog</a><a href="/ordering">Ordering &amp; delivery</a><a href="/sitemap.xml">Sitemap</a><span>Prices in USD. Availability confirmed by supplier.</span></footer>' : ""}
         ${cartFeedbackHTML()}
         ${quickAddModalHTML()}
       </div>`;
@@ -465,6 +628,7 @@
       layout(`<main class="content"><div class="empty">Loading catalog...</div></main>`);
       return;
     }
+    updatePageMetadata();
     if (state.view === "detail") return renderDetail();
     if (state.view === "cart") return renderCart();
     if (state.view === "admin") return renderAdmin();
@@ -484,6 +648,7 @@
   }
 
   function renderCatalog() {
+    updatePageMetadata();
     const list = filteredProducts();
     const visibleProducts = products.filter((p) => p.published !== false);
     layout(`
@@ -491,6 +656,7 @@
       <div class="catalog-sticky">
         <section class="toolbar" id="products">
           <label class="filter-field search-field"><span>Search</span><input class="search" data-action="search" placeholder="Search SKU, brand, product..." value="${escapeHTML(state.search)}">${searchSuggestions()}</label>
+          <button type="button" class="new-arrivals ${state.newArrivals ? "active" : ""}" data-new-arrivals aria-pressed="${state.newArrivals}">NEW ARRIVALS</button>
           <label class="filter-field"><span>Brand</span><select data-action="brand">${brands().map((b) => `<option ${b === state.brand ? "selected" : ""}>${escapeHTML(b)}</option>`).join("")}</select></label>
           <label class="filter-field"><span>Category</span><select data-action="category">${categories().map((c) => `<option ${c === state.category ? "selected" : ""}>${escapeHTML(c)}</option>`).join("")}</select></label>
           <label class="filter-field"><span>Sort</span><select data-action="sort">
@@ -503,10 +669,12 @@
         ${activeFilterChips()}
       </div>
       <main class="content">
-        <div class="section-title compact-title"><div><h2>Products</h2><p>${list.length} matching items</p></div></div>
+        <div class="section-title compact-title"><div><h1>${state.brand !== "All" && state.category === "All" ? `${escapeHTML(state.brand)} Wholesale Beauty Products` : state.category !== "All" && state.brand === "All" ? `${escapeHTML(state.category)} Wholesale Beauty Products` : "Wholesale Beauty Products"}</h1><p>${list.length} matching items</p></div></div>
         <div class="grid">
-          ${list.map(productCard).join("")}
+          ${list.map((product, index) => productCard(product, index)).join("")}
         </div>
+        <nav class="collection-links" aria-label="Categories">${categories().filter((value) => value !== "All").map((value) => `<a href="${escapeHTML(collectionPath("category", value))}" data-filter-category="${escapeHTML(value)}">${escapeHTML(value)}</a>`).join("")}</nav>
+        ${qaSection()}
       </main>`);
   }
 
@@ -524,23 +692,23 @@
           <span>All</span><em>${visibleProducts.length}</em>
         </button>
         ${brandItems.map((brand) => `
-          <button class="${state.brand === brand ? "active" : ""}" data-filter-brand="${escapeHTML(brand)}" title="Show ${escapeHTML(brand)} products">
+          <a href="${escapeHTML(collectionPath("brand", brand))}" class="${state.brand === brand ? "active" : ""}" data-filter-brand="${escapeHTML(brand)}" title="Show ${escapeHTML(brand)} products">
             <span>${escapeHTML(brand)}</span><em>${counts.get(brand) || 0}</em>
-          </button>`).join("")}
+          </a>`).join("")}
       </aside>`;
   }
 
-  function productCard(p) {
+  function productCard(p, index = 0) {
     const options = shadeOptions(p);
     return `
       <article class="card">
-        <button class="product-image" data-detail="${escapeHTML(p.id)}" aria-label="View ${escapeHTML(p.name)}">${productImage(p)}</button>
+        <a class="product-image" href="${escapeHTML(productPath(p.id))}" data-detail="${escapeHTML(p.id)}" aria-label="View ${escapeHTML(p.name)}">${productImage(p, index < 5 ? "eager" : "lazy")}</a>
         <div class="card-body">
           <div class="meta">
-            <button class="tag tag-button" data-filter-brand="${escapeHTML(p.brand)}" title="Show all ${escapeHTML(p.brand)} products">${escapeHTML(p.brand)}</button>
-            <button class="tag tag-button" data-filter-category="${escapeHTML(p.category)}" title="Show all ${escapeHTML(p.category)} products">${escapeHTML(p.category)}</button>
+            <a class="tag tag-button" href="${escapeHTML(collectionPath("brand", p.brand))}" data-filter-brand="${escapeHTML(p.brand)}" title="Show all ${escapeHTML(p.brand)} products">${escapeHTML(p.brand)}</a>
+            <a class="tag tag-button" href="${escapeHTML(collectionPath("category", p.category))}" data-filter-category="${escapeHTML(p.category)}" title="Show all ${escapeHTML(p.category)} products">${escapeHTML(p.category)}</a>
           </div>
-          <h3>${escapeHTML(p.name)}</h3>
+          <h3><a class="product-title-link" href="${escapeHTML(productPath(p.id))}" data-detail="${escapeHTML(p.id)}">${escapeHTML(p.name)}</a>${p.is_best_seller ? ' <span class="best-seller">best seller</span>' : ""}</h3>
           <p class="desc">${escapeHTML(p.description)}</p>
           <div class="card-signals"><span>${options.length} shade${options.length === 1 ? "" : "s"}</span><span>SKU ${escapeHTML(p.sku)}</span></div>
           ${cartStatusForProduct(p.id)}
@@ -550,8 +718,8 @@
   }
 
   function renderDetail() {
-    const p = products.find((item) => item.id === state.detailId) || products[0];
-    if (!p) return renderCatalog();
+    const p = products.find((item) => item.id === state.detailId && item.published !== false && !item.archived_at);
+    if (!p) return layout('<main class="content"><h1>Product not found</h1><p>This product is no longer available.</p><a href="/">Browse products</a></main>');
     const options = shadeOptions(p);
     if (!options.includes(state.selectedColor)) state.selectedColor = options[0];
     const images = productImages(p);
@@ -643,7 +811,7 @@
             </label>
             <div class="total-box">
               <div><span>Product total</span><strong>${money(totals.productTotal)}</strong></div>
-              <div><span>Total weight</span><strong>${weight(totals.totalWeight)}</strong></div>
+              <div><span>Shipping weight</span><strong>${weight(totals.shippingWeight)}</strong></div>
               <div><span>SHIPPING COST</span><strong>${money(totals.shipping)}</strong></div>
               <div><span>TOTAL</span><strong>${money(totals.total)}</strong></div>
             </div>
@@ -733,6 +901,8 @@
 
   function renderAdmin() {
     if (!isAdminAuthed) return renderAdminLogin();
+    if (state.adminMenu === "factory") return renderFactoryOrders();
+    if (!state.salesReportRequested) window.setTimeout(loadSalesReport, 0);
     const editing = products.find((p) => p.id === state.editingId) || null;
     const p = editing || { sku: "", brand: "", name: "", category: "Cosmetics", price: "", stock: "", weight: "", description: "", colors: [], image: "", images: [], published: true };
     const adminProducts = filteredAdminProducts();
@@ -744,6 +914,7 @@
     layout(`
       <main class="admin">
         <div class="section-title"><div><h2>Catalog admin</h2><p>Edit products, publish products, and manage product images.</p></div><button class="ghost" data-logout-admin>Logout</button></div>
+        ${adminMenuHTML()}
         <div class="notice">${apiOnline ? "Admin changes are saved to the SQLite database on the server." : "Server API is unavailable; admin saving is disabled until the backend is running."}</div>
         ${state.adminStatus ? `<div class="notice">${escapeHTML(state.adminStatus)}</div>` : ""}
         <section class="panel order-download-panel">
@@ -752,6 +923,16 @@
             ${field("Order No.", `<input name="orderNo" placeholder="DL202606110930001A2B" required>`)}
             <button class="primary" type="submit">Download order Excel</button>
           </form>
+        </section>
+        <section class="panel sales-report-panel">
+          <div class="sales-report-head">
+            <div><h3>Top 20 best-selling products</h3><p class="small">Ranked by quantity in submitted orders.</p></div>
+            <div class="sales-report-actions">
+              <button class="ghost" type="button" data-sales-refresh>Refresh statistics</button>
+              <a class="primary" href="/api/admin/sales-report/excel">Export all products</a>
+            </div>
+          </div>
+          ${salesReportHTML()}
         </section>
         <div class="admin-grid">
           <form class="panel form-stack" data-admin-form novalidate>
@@ -770,7 +951,7 @@
             ${field("Colors / shade options", `<input name="colors" placeholder="Use / only, example: 1/2/3" required value="${escapeHTML((p.colors || []).join("/"))}">`)}
             ${imageManagerBlock(p)}
             ${field("Product information", `<textarea name="description" placeholder="Product information">${escapeHTML(p.description)}</textarea>`)}
-            <label class="check-field"><input type="checkbox" name="published" ${p.published !== false ? "checked" : ""}> Published</label>
+            ${p.archived_at ? '<p class="small">Archived product. Save changes keeps it archived. Use Restore &amp; publish to list it again.</p>' : `<label class="check-field"><input type="checkbox" name="published" ${p.published !== false ? "checked" : ""}> Published</label>`}
             <button class="primary" type="submit">${editing ? "Save changes" : "Add product"}</button>
             <div class="save-feedback" data-save-feedback aria-live="polite">${state.adminStatus ? escapeHTML(state.adminStatus) : ""}</div>
             ${editing ? `<button class="ghost" type="button" data-cancel-edit>Cancel edit</button>` : ""}
@@ -778,7 +959,10 @@
           </form>
           <section class="panel">
             <h3>${adminProducts.length} / ${products.length} products</h3>
-            ${field("Search products", `<input data-action="admin-search" placeholder="Search SKU, name, brand, category..." value="${escapeHTML(state.adminSearch)}">`)}
+            <div class="admin-catalog-filters">
+              ${field("Search products", `<input data-action="admin-search" placeholder="Search SKU, name, brand, category..." value="${escapeHTML(state.adminSearch)}">`)}
+              ${field("Product status", `<select data-action="admin-product-status">${[["active", "Active"], ["draft", "Drafts"], ["archived", "Archived"], ["all", "All products"]].map(([value, label]) => `<option value="${value}" ${state.adminProductStatus === value ? "selected" : ""}>${label}</option>`).join("")}</select>`)}
+            </div>
             ${adminPaginationHTML(adminProducts.length, pageStart, pageItems.length, adminTotalPages)}
             <div class="admin-list">${pageItems.map(adminRow).join("")}</div>
             ${adminPaginationHTML(adminProducts.length, pageStart, pageItems.length, adminTotalPages)}
@@ -787,10 +971,107 @@
       </main>`);
   }
 
+  function adminMenuHTML() {
+    return `<nav class="admin-menu" aria-label="Admin sections"><button type="button" class="${state.adminMenu === "catalog" ? "primary" : "ghost"}" data-admin-menu="catalog">Products &amp; orders</button><button type="button" class="${state.adminMenu === "factory" ? "primary" : "ghost"}" data-admin-menu="factory">Factory orders</button></nav>`;
+  }
+
+  function resetFactoryValidation() {
+    state.factoryReports = [];
+    state.factoryErrors = [];
+    state.factoryToken = "";
+    state.factorySummary = null;
+    state.factoryStatus = "";
+  }
+
+  function renderFactoryOrders() {
+    if (!isAdminAuthed) return renderAdminLogin();
+    layout(`<main class="admin factory-page">
+      <div class="section-title"><h2>Factory order summary</h2><button class="ghost" data-logout-admin>Logout</button></div>
+      ${adminMenuHTML()}
+      <label class="factory-upload-label">Customer order Excel files (.xlsx)<input type="file" accept=".xlsx" multiple data-factory-files ${state.factoryBusy ? "disabled" : ""}></label>
+      <ul class="factory-file-list">${state.factoryFiles.map((file, index) => {
+        const report = state.factoryReports[index];
+        return `<li><span>${escapeHTML(file.name)}</span><small>${(file.size / 1024 / 1024).toFixed(1)} MB${report ? ` · ${report.errors.length ? "Needs correction" : "Passed"}` : ""}</small><button type="button" class="ghost" data-factory-remove="${index}" aria-label="Remove ${escapeHTML(file.name)}" ${state.factoryBusy ? "disabled" : ""}>Remove</button></li>`;
+      }).join("")}</ul>
+      <div class="factory-actions"><button class="primary" data-factory-validate ${!state.factoryFiles.length || state.factoryBusy ? "disabled" : ""}>Upload &amp; validate all</button><button class="primary" data-factory-merge ${!state.factoryToken || state.factoryBusy ? "disabled" : ""}>Merge &amp; download</button><button class="ghost" data-factory-clear ${state.factoryBusy ? "disabled" : ""}>Clear files</button></div>
+      <p class="factory-status" role="status">${escapeHTML(state.factoryStatus)}</p>
+      ${state.factorySummary ? `<p>${state.factorySummary.files} files · ${state.factorySummary.source_rows} source product rows · ${state.factorySummary.factory_rows} factory rows · ${state.factorySummary.quantity} pieces</p>` : ""}
+      ${state.factoryErrors.length ? `<h3>${state.factoryErrors.length} issues to correct</h3><div class="factory-errors"><table><thead><tr><th>File</th><th>Sheet</th><th>Row</th><th>Field</th><th>Reason</th></tr></thead><tbody>${state.factoryErrors.map(error => `<tr><td>${escapeHTML(error.filename)}</td><td>${escapeHTML(error.sheet || "")}</td><td>${error.row ?? ""}</td><td>${escapeHTML(error.field || "")}</td><td>${escapeHTML(error.reason)}</td></tr>`).join("")}</tbody></table></div>` : ""}
+    </main>`);
+  }
+
+  async function validateFactoryOrders() {
+    if (!isAdminAuthed || state.factoryBusy || !state.factoryFiles.length) return;
+    resetFactoryValidation();
+    state.factoryBusy = true;
+    state.factoryStatus = "Uploading and checking all selected files...";
+    renderFactoryOrders();
+    try {
+      const errors = [];
+      if (state.factoryFiles.length > 20) errors.push({ filename: "Batch", reason: "Select no more than 20 files." });
+      if (state.factoryFiles.reduce((size, file) => size + file.size, 0) > 180 * 1024 * 1024) errors.push({ filename: "Batch", reason: "Combined upload exceeds 180 MB." });
+      if (errors.length) {
+        state.factoryErrors = errors;
+        state.factoryStatus = "Correct all listed issues, then select the corrected files and validate again.";
+        return;
+      }
+      const form = new FormData();
+      for (const file of state.factoryFiles) form.append("files", file, file.name);
+      const response = await fetch("/api/admin/factory-orders/validate", { method: "POST", credentials: "same-origin", cache: "no-store", body: form });
+      const result = await response.json();
+      state.factoryReports = result.files || [];
+      state.factoryErrors = result.errors || [];
+      if (response.status === 422) {
+        state.factoryStatus = "Correct all listed issues, remove the old files, then upload the corrected files and validate again.";
+      } else if (!response.ok) {
+        throw new Error(result.error || "Upload failed. Please try again.");
+      } else {
+        state.factoryToken = result.batch_token;
+        state.factorySummary = result.summary;
+        state.factoryStatus = "All files passed. Ready to merge within 2 hours.";
+      }
+    } catch (error) {
+      state.factoryStatus = error.message;
+    } finally {
+      state.factoryBusy = false;
+      if (state.view === "admin" && state.adminMenu === "factory") renderFactoryOrders();
+    }
+  }
+
+  async function mergeFactoryOrders() {
+    if (!isAdminAuthed || !state.factoryToken || state.factoryBusy) return;
+    state.factoryBusy = true;
+    state.factoryStatus = "Generating factory order...";
+    renderFactoryOrders();
+    try {
+      const blob = await apiBlob("/api/admin/factory-orders/merge", { batch_token: state.factoryToken });
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = `factory-order-${new Date().toISOString().replace(/[-:]/g, "").slice(0, 15)}.xlsx`;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 60000);
+      state.factoryStatus = "Factory order downloaded. Sheet 2 lists the source filenames.";
+    } catch (error) {
+      state.factoryStatus = error.message;
+    } finally {
+      state.factoryBusy = false;
+      if (state.view === "admin" && state.adminMenu === "factory") renderFactoryOrders();
+    }
+  }
+
   function filteredAdminProducts() {
     const query = state.adminSearch.trim().toLowerCase();
-    if (!query) return products;
-    return products.filter((product) =>
+    const list = products.filter((product) => {
+      if (state.adminProductStatus === "archived") return Boolean(product.archived_at);
+      if (state.adminProductStatus === "draft") return !product.archived_at && product.published === false;
+      if (state.adminProductStatus === "active") return !product.archived_at;
+      return true;
+    });
+    if (!query) return list;
+    return list.filter((product) =>
       [product.sku, product.brand, product.name, product.category, product.description]
         .join(" ")
         .toLowerCase()
@@ -974,20 +1255,71 @@
       </main>`);
   }
 
+  function salesReportDate(timestamp) {
+    if (!timestamp) return "No orders";
+    return new Date(Number(timestamp) * 1000).toLocaleString("en-GB", {
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+  }
+
+  function salesReportHTML() {
+    const report = state.salesReport;
+    if (state.salesReportLoading) {
+      return `<div class="notice">Loading sales statistics...</div>`;
+    }
+    if (state.salesReportError) {
+      return `<div class="notice">${escapeHTML(state.salesReportError)}</div>`;
+    }
+    if (!report) return `<div class="notice">Sales statistics are not loaded yet.</div>`;
+    const rows = report.rows || [];
+    if (!rows.length) return `<div class="empty">No submitted order data yet.</div>`;
+    return `
+      <div class="sales-report-summary">
+        <span>Top 20 units: <strong>${Number(report.total_units || 0).toLocaleString()}</strong></span>
+        <span>Top 20 revenue: <strong>${money(report.total_revenue)}</strong></span>
+        <span>Based on submitted orders</span>
+      </div>
+      <div class="sales-report-table-wrap">
+        <table class="sales-report-table">
+          <thead><tr><th>Rank</th><th>Product</th><th>Units sold</th><th>Orders</th><th>Revenue</th><th>Last order</th></tr></thead>
+          <tbody>
+            ${rows.map((row, index) => `
+              <tr>
+                <td class="sales-rank">${index + 1}</td>
+                <td>
+                  <div class="sales-product-cell">
+                    <div class="sales-report-thumb">${row.image ? `<img src="${escapeHTML(adminThumbSrc(row.image))}" alt="${escapeHTML(row.name)}" loading="lazy" decoding="async">` : escapeHTML(String(row.brand || "").slice(0, 2))}</div>
+                    <div><strong>${escapeHTML(row.name)}</strong><span>${escapeHTML(row.sku)} · ${escapeHTML(row.brand)}</span></div>
+                  </div>
+                </td>
+                <td><strong>${Number(row.units_sold || 0).toLocaleString()}</strong></td>
+                <td>${Number(row.order_count || 0).toLocaleString()}</td>
+                <td>${money(row.revenue)}</td>
+                <td>${escapeHTML(salesReportDate(row.last_order_at))}</td>
+              </tr>`).join("")}
+          </tbody>
+        </table>
+      </div>`;
+  }
+
   function adminRow(p) {
     return `
       <div class="admin-row">
         <div class="thumb">${p.image ? `<img src="${escapeHTML(adminThumbSrc(p.image))}" alt="${escapeHTML(p.name)}" loading="lazy" decoding="async">` : escapeHTML(p.brand.slice(0, 2))}</div>
-        <div><strong>${escapeHTML(p.name)}</strong><div class="small">${escapeHTML(p.sku)} · ${escapeHTML(p.brand)} · ${p.published === false ? "Draft" : "Published"}</div></div>
+        <div><strong>${escapeHTML(p.name)}</strong><div class="small">${escapeHTML(p.sku)} · ${escapeHTML(p.brand)} · ${p.archived_at ? "Archived" : p.published === false ? "Draft" : "Published"}</div></div>
         <div>${money(p.price)}</div>
         <button class="ghost" data-edit="${escapeHTML(p.id)}">Edit</button>
-        <button class="ghost" data-delete="${escapeHTML(p.id)}">Archive</button>
+        ${p.archived_at ? `<button class="primary" data-restore="${escapeHTML(p.id)}">Restore &amp; publish</button>` : `<button class="ghost" data-delete="${escapeHTML(p.id)}">Archive</button>`}
       </div>`;
   }
 
   function addToCart(id, color = state.selectedColor || "Default", qty = state.qty || 1) {
     const p = products.find((item) => item.id === id);
-    if (!p) return;
+    if (!p || p.published === false || p.archived_at) return;
     const selected = color || "Default";
     const amount = Math.max(1, Number(qty || 1));
     const key = `${id}__${selected}`;
@@ -1005,8 +1337,37 @@
   }
 
   document.addEventListener("click", async (event) => {
-    const target = event.target.closest("button, .brand, [data-quick-backdrop]");
+    const target = event.target.closest("button, a[data-detail], a[data-filter-brand], a[data-filter-category], .brand, [data-quick-backdrop]");
     if (!target) return;
+    if (target.dataset.adminMenu) {
+      state.adminMenu = target.dataset.adminMenu;
+      renderAdmin();
+      return;
+    }
+    if (target.dataset.factoryRemove !== undefined && !state.factoryBusy) {
+      state.factoryFiles.splice(Number(target.dataset.factoryRemove), 1);
+      resetFactoryValidation();
+      renderFactoryOrders();
+      return;
+    }
+    if (target.hasAttribute("data-factory-validate")) return validateFactoryOrders();
+    if (target.hasAttribute("data-factory-merge")) return mergeFactoryOrders();
+    if (target.hasAttribute("data-factory-clear") && !state.factoryBusy) {
+      state.factoryFiles = [];
+      resetFactoryValidation();
+      renderFactoryOrders();
+      return;
+    }
+    if (target.tagName === "A") {
+      if (event.ctrlKey || event.metaKey || event.shiftKey || event.altKey || event.button !== 0) return;
+      event.preventDefault();
+    }
+    if (target.hasAttribute("data-new-arrivals")) {
+      state.newArrivals = !state.newArrivals;
+      updateCatalogUrl();
+      renderCatalog();
+      return;
+    }
     if (target.dataset.quickBackdrop !== undefined && event.target === target) {
       state.quickAddId = null;
       render();
@@ -1014,9 +1375,11 @@
     }
     if (target.dataset.clearFilter) {
       const key = target.dataset.clearFilter;
+      if (key === "new" || key === "all") state.newArrivals = false;
       if (key === "search" || key === "all") state.search = "";
       if (key === "brand" || key === "all") state.brand = "All";
       if (key === "category" || key === "all") state.category = "All";
+      updateCatalogUrl();
       renderCatalog();
       return;
     }
@@ -1026,6 +1389,7 @@
       state.search = "";
       state.brand = target.dataset.filterBrand;
       state.category = "All";
+      updateCatalogUrl();
       render();
       window.setTimeout(() => document.getElementById("products")?.scrollIntoView({ behavior: "smooth" }), 0);
       return;
@@ -1036,6 +1400,7 @@
       state.search = "";
       state.brand = "All";
       state.category = target.dataset.filterCategory;
+      updateCatalogUrl();
       render();
       window.setTimeout(() => document.getElementById("products")?.scrollIntoView({ behavior: "smooth" }), 0);
       return;
@@ -1043,7 +1408,10 @@
     if (target.dataset.view) {
       state.view = target.dataset.view;
       state.detailId = null;
+      if (state.view === "catalog") updateCatalogUrl();
+      else history.pushState({ view: state.view }, "", `/#${state.view}`);
       render();
+      return;
     }
     if (target.dataset.adminPage) {
       const totalPages = Math.max(1, Math.ceil(filteredAdminProducts().length / ADMIN_PAGE_SIZE));
@@ -1054,8 +1422,18 @@
       renderAdmin();
       return;
     }
+    if (target.dataset.salesRefresh !== undefined) {
+      if (!isAdminAuthed) return renderAdminLogin();
+      state.salesReportRequested = false;
+      state.salesReport = null;
+      state.salesReportError = "";
+      renderAdmin();
+      loadSalesReport();
+      return;
+    }
     if (target.dataset.scroll) document.getElementById(target.dataset.scroll)?.scrollIntoView({ behavior: "smooth" });
     if (target.dataset.detail) {
+      event.preventDefault();
       openDetail(target.dataset.detail);
       return;
     }
@@ -1133,13 +1511,35 @@
         await apiFetch("/api/logout", { method: "POST", body: "{}" });
       } catch {}
       isAdminAuthed = false;
+      state.factoryFiles = [];
+      resetFactoryValidation();
+      state.adminMenu = "catalog";
       state.editingId = null;
       state.adminStatus = "";
+      state.salesReport = null;
+      state.salesReportError = "";
+      state.salesReportRequested = false;
       render();
     }
     if (target.dataset.edit) {
       state.editingId = target.dataset.edit;
       render();
+    }
+    if (target.dataset.restore) {
+      if (!isAdminAuthed) return renderAdminLogin();
+      target.disabled = true;
+      try {
+        await apiFetch(`/api/products/${encodeURIComponent(target.dataset.restore)}/restore`, { method: "POST", body: "{}" });
+        await refreshProducts();
+        state.adminStatus = "Product restored and published.";
+        state.adminProductFeedback = state.adminStatus;
+        if (state.editingId === target.dataset.restore) state.editingId = null;
+        renderAdmin();
+      } catch (error) {
+        state.adminProductFeedback = error.message;
+        renderAdmin();
+      }
+      return;
     }
     if (target.dataset.delete) {
       if (!isAdminAuthed) return renderAdminLogin();
@@ -1150,6 +1550,7 @@
         if (state.editingId === archivedId) state.editingId = null;
         await refreshProducts();
         state.adminStatus = "Product archived.";
+        state.adminProductFeedback = state.adminStatus;
         renderAdmin();
       } catch (error) {
         state.adminStatus = error.message;
@@ -1162,12 +1563,17 @@
     }
   });
 
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape" && event.target.closest(".search-field")) event.target.blur();
+  });
+
   document.addEventListener("input", (event) => {
     const el = event.target;
     if (el.dataset.action === "search") {
       const start = el.selectionStart ?? el.value.length;
       const end = el.selectionEnd ?? start;
       state.search = el.value;
+      updateCatalogUrl(true);
       renderCatalog();
       refocusControl('[data-action="search"]', start, end);
     }
@@ -1175,6 +1581,7 @@
       const start = el.selectionStart ?? el.value.length;
       const end = el.selectionEnd ?? start;
       state.adminSearch = el.value;
+      state.adminProductFeedback = "";
       state.adminPage = 1;
       renderAdmin();
       refocusControl('[data-action="admin-search"]', start, end);
@@ -1190,12 +1597,27 @@
 
   document.addEventListener("change", async (event) => {
     const el = event.target;
+    if (el.hasAttribute("data-factory-files") && !state.factoryBusy) {
+      state.factoryFiles.push(...Array.from(el.files || []));
+      resetFactoryValidation();
+      renderFactoryOrders();
+      return;
+    }
+    if (el.dataset.action === "admin-product-status") {
+      state.adminProductStatus = el.value;
+      state.adminPage = 1;
+      state.adminProductFeedback = "";
+      renderAdmin();
+      return;
+    }
     if (el.dataset.action === "brand") {
       state.brand = el.value;
+      updateCatalogUrl();
       renderCatalog();
     }
     if (el.dataset.action === "category") {
       state.category = el.value;
+      updateCatalogUrl();
       renderCatalog();
     }
     if (el.dataset.action === "sort") {
@@ -1308,7 +1730,7 @@
     }
     whatsappNumber = String(data.whatsapp || whatsappNumber).replace(/[^\d]/g, "") || whatsappNumber;
     const colorOptions = cleanColorList(splitColorText(data.colors));
-    const product = normalizeProduct({
+    const product = {
       id: data.sku.trim(),
       sku: data.sku.trim(),
       brand: data.brand.trim(),
@@ -1319,10 +1741,10 @@
       weight: positiveDecimal(data.weight),
       description: data.description.trim(),
       colors: colorOptions,
-      image: data.image.trim(),
-      images: cleanImageList(String(data.images || "").split(/\n|,/)),
+      image: normalizeAssetUrl(String(data.image || "").trim()),
+      images: cleanImageList(String(data.images || "").split(/\n|,/)).map(normalizeAssetUrl),
       published: data.published === "on",
-    });
+    };
     if (!product.sku || !product.name) return;
     const feedback = form.querySelector("[data-save-feedback]");
     const submitButton = form.querySelector('button[type="submit"]');
@@ -1365,6 +1787,18 @@
     } finally {
       if (submitButton) submitButton.disabled = false;
     }
+  });
+
+  window.addEventListener("popstate", () => {
+    const productId = productIdFromPath();
+    const params = new URLSearchParams(location.search);
+    state.view = productId ? "detail" : location.hash === "#admin" ? "admin" : location.hash === "#cart" ? "cart" : "catalog";
+    state.detailId = productId || null;
+    state.brand = params.get("brand") || "All";
+    state.category = params.get("category") || "All";
+    state.search = params.get("q") || "";
+    state.newArrivals = params.get("new") === "1";
+    render();
   });
 
   loadServerState().then(render);
