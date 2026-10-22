@@ -165,6 +165,11 @@ easier.
   even when populated cells report Arial.
 - Color/shade options split only on `/`. Spaces and hyphens are literal content:
   `1/2/3` becomes three choices; `1-2-3` and `1 2 3` remain one choice.
+- Never silently truncate shade lists or other editable product fields. Explicit
+  shades must not be filtered by words such as net, size, weight or cm, or have
+  punctuation removed. Keep request/upload security limits, which reject rather
+  than truncate oversized submissions. Run `node scripts/test_product_fields.cjs`
+  and `python -m scripts.test_product_fields` after changing field handling.
 - The admin `Colors / shade options` field is authoritative when saving a
   product. `Colors:` text inside Product information is only a legacy/display
   fallback when stored colors are empty, and must never override explicit admin

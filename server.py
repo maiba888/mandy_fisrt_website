@@ -54,7 +54,7 @@ HTTPS_ENABLED = os.environ.get("HTTPS", "0") == "1"
 PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "https://bebeauty.top").rstrip("/")
 
 SEO_SITE_NAME = "BeBeauty Wholesale Catalog"
-ASSET_VERSION = "20261013-factory"
+ASSET_VERSION = "20261022-shades"
 FACTORY_UPLOAD_LOCK = threading.Lock()
 SEO_HOME_DESCRIPTION = (
     "Browse wholesale cosmetics and beauty products by brand, category, SKU, "

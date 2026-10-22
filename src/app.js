@@ -228,11 +228,8 @@
     const cleaned = (items || [])
       .flatMap((item) => splitColorText(item))
       .map((item) => String(item || "").trim())
-      .map((item) => item.replace(/^colou?rs?\s*[:：]/i, "").replace(/^[#/\-\s]+|[#/\-\s]+$/g, ""))
-      .filter(Boolean)
-      .filter((item) => !/(?:size|gross|net|weight|cm|\*)/i.test(item))
-      .filter((item) => !/^\d+(?:\.\d+)?g$/i.test(item));
-    return Array.from(new Set(cleaned)).slice(0, 18);
+      .filter(Boolean);
+    return Array.from(new Set(cleaned));
   }
 
   function splitColorText(value) {
