@@ -1,5 +1,18 @@
 # Luxe Trade Catalog - Agent Handover Guide
 
+## Operational Override - 2026-10-24
+
+- The owner has retired Alibaba backups and replication for this project.
+  `luxe-replication.timer` on Tencent is disabled and stopped. Do not start the
+  replication service, re-enable its timer, or copy code/data/images to Alibaba
+  unless the owner explicitly requests reinstatement. This overrides all older
+  Alibaba synchronization, verification and warm-standby instructions below.
+- Releases now end at `local development -> GitHub -> Tencent Cloud`.
+  Keep Tencent's own daily backups enabled.
+- Alibaba historical Luxe database backups and the replication incoming copy
+  have been deleted. Its live app/database/images were deliberately retained,
+  but are no longer current or a maintained standby. Other projects are untouched.
+
 Read this file completely before changing, deploying, synchronizing, or
 troubleshooting this project.
 
