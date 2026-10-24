@@ -731,6 +731,7 @@ def sales_report_rows(conn, limit=20, include_zero=False, sort_by_brand=False):
             p.name,
             p.image,
             p.price,
+            p.colors_json,
             COALESCE(sales.units_sold, 0) AS units_sold,
             COALESCE(sales.order_count, 0) AS order_count,
             COALESCE(sales.revenue, 0) AS revenue,
@@ -753,6 +754,7 @@ def sales_report_rows(conn, limit=20, include_zero=False, sort_by_brand=False):
             "name": row["name"],
             "image": row["image"],
             "price": round(float(row["price"] or 0), 2),
+            "colors": json.loads(row["colors_json"] or "[]"),
             "units_sold": int(row["units_sold"] or 0),
             "order_count": int(row["order_count"] or 0),
             "revenue": round(float(row["revenue"] or 0), 2),
@@ -1429,14 +1431,16 @@ def build_sales_report_workbook(rows):
     wb._fonts[0] = default_font
     wb._named_styles["Normal"].font = default_font
 
-    ws.merge_cells("A1:J1")
+    ws.merge_cells("A1:L1")
     ws["A1"] = "All Products Sales Statistics"
     ws["A1"].font = Font(name="Arial", family=2, size=16, bold=True)
-    ws["A2"] = "All catalog products, ranked by cumulative quantity in submitted customer orders. Sort Units Sold to find the top 20."
+    ws["A2"] = "All catalog products, sorted by Brand A-Z. Sort Units Sold to find the top 20."
     ws["A2"].font = Font(name="Arial", family=2, italic=True, color="6B5E55")
     ws["A3"] = "Generated at"
     ws["B3"] = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now()))
     ws["A3"].font = Font(name="Arial", family=2, bold=True)
+    ws.merge_cells("A4:L4")
+    ws["A4"] = "Order details: enter one shade and quantity per line, for example 01 * 5 PCS."
 
     headers = [
         "Sales Rank",
@@ -1448,6 +1452,8 @@ def build_sales_report_workbook(rows):
         "Status",
         "Order Count",
         "Sales Revenue (USD)",
+        "Colors / Shade options",
+        "Order details",
         "Units Sold",
     ]
     header_row = 5
@@ -1471,10 +1477,18 @@ def build_sales_report_workbook(rows):
                 status,
                 item["order_count"],
                 item["revenue"],
+                "\n".join(split_color_text("/".join(item.get("colors") or []))),
+                "",
                 item["units_sold"],
             ]
         )
         ws.row_dimensions[row_number].height = 76
+        ws.cell(row_number, 10).data_type = "s"
+        ws.cell(row_number, 10).number_format = "@"
+        ws.cell(row_number, 11).number_format = "@"
+        ws.cell(row_number, 11).fill = PatternFill("solid", fgColor="EAF3FF")
+        shade_lines = ws.cell(row_number, 10).value.count("\n") + 1
+        ws.row_dimensions[row_number].height = min(409, max(76, shade_lines * 14 + 8))
         image_path = make_thumbnail(item["image"], 96)
         if image_path:
             try:
@@ -1483,7 +1497,7 @@ def build_sales_report_workbook(rows):
                 if image.width:
                     image.height = int(image.height * (target_width / image.width))
                     image.width = target_width
-                    ws.row_dimensions[row_number].height = max(76, image.height * 0.75 + 8)
+                    ws.row_dimensions[row_number].height = max(ws.row_dimensions[row_number].height, image.height * 0.75 + 8)
                 ws.add_image(image, f"E{row_number}")
             except Exception:
                 pass
@@ -1495,8 +1509,8 @@ def build_sales_report_workbook(rows):
     ws.cell(totals_row, 9, f"=SUM(I{header_row + 1}:I{data_end_row})")
     ws.cell(totals_row, 9).number_format = "$0.00"
     ws.cell(totals_row, 9).font = Font(name="Arial", family=2, bold=True)
-    ws.cell(totals_row, 10, f"=SUM(J{header_row + 1}:J{data_end_row})")
-    ws.cell(totals_row, 10).font = Font(name="Arial", family=2, bold=True)
+    ws.cell(totals_row, 12, f"=SUM(L{header_row + 1}:L{data_end_row})")
+    ws.cell(totals_row, 12).font = Font(name="Arial", family=2, bold=True)
 
     widths = {
         "A": 12,
@@ -1508,11 +1522,13 @@ def build_sales_report_workbook(rows):
         "G": 12,
         "H": 14,
         "I": 20,
-        "J": 14,
+        "J": 36,
+        "K": 30,
+        "L": 14,
     }
     for column, width in widths.items():
         ws.column_dimensions[column].width = width
-    for row in ws.iter_rows(min_row=header_row, max_row=ws.max_row, min_col=1, max_col=10):
+    for row in ws.iter_rows(min_row=header_row, max_row=ws.max_row, min_col=1, max_col=12):
         for cell in row:
             cell.alignment = Alignment(vertical="center", wrap_text=True)
             font = copy(cell.font)
@@ -1525,9 +1541,9 @@ def build_sales_report_workbook(rows):
         ws[f"F{row}"].number_format = "$0.00"
         ws[f"H{row}"].number_format = "#,##0"
         ws[f"I{row}"].number_format = "$0.00"
-        ws[f"J{row}"].number_format = "#,##0"
+        ws[f"L{row}"].number_format = "#,##0"
     ws.freeze_panes = "A6"
-    ws.auto_filter.ref = f"A{header_row}:J{header_row + max(len(rows), 1)}"
+    ws.auto_filter.ref = f"A{header_row}:L{header_row + max(len(rows), 1)}"
     wb.calculation.fullCalcOnLoad = True
     wb.calculation.forceFullCalc = True
     wb.calculation.calcMode = "auto"

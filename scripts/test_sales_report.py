@@ -1,5 +1,4 @@
 import io
-import io
 import json
 import sqlite3
 import unittest
@@ -49,6 +48,9 @@ class SalesReportTests(unittest.TestCase):
                 ("O3", json.dumps([{"id": "p2", "qty": 1, "price": 5.0}]), 300),
             ],
         )
+        self.db.execute("ALTER TABLE products ADD COLUMN colors_json TEXT DEFAULT '[]'")
+        self.shades = [f'{i:02d}' for i in range(1, 29)] + ['warm pink', '1-2-3', '=literal']
+        self.db.execute("UPDATE products SET colors_json=? WHERE id='p1'", (json.dumps(self.shades),))
 
     def tearDown(self):
         self.db.close()
@@ -77,12 +79,28 @@ class SalesReportTests(unittest.TestCase):
         workbook = load_workbook(io.BytesIO(workbook_data), read_only=False)
         sheet = workbook["All Products"]
         self.assertEqual(sheet["A1"].value, "All Products Sales Statistics")
-        self.assertEqual(sheet["J6"].value, 5)
+        self.assertEqual(sheet["L6"].value, 5)
         self.assertEqual(sheet["I6"].value, 19)
-        self.assertEqual(sheet["J8"].value, 0)
-        self.assertEqual(sheet["J5"].value, "Units Sold")
+        self.assertEqual(sheet["L8"].value, 0)
+        self.assertEqual(sheet["L5"].value, "Units Sold")
+        self.assertEqual(sheet["J5"].value, "Colors / Shade options")
+        self.assertEqual(sheet["K5"].value, "Order details")
+        self.assertEqual(sheet["J6"].value.splitlines(), self.shades)
+        self.assertEqual(sheet["J6"].data_type, 's')
+        self.assertIsNone(sheet["K6"].value)
+        self.assertEqual(sheet["K6"].number_format, '@')
+        self.assertEqual(sheet.auto_filter.ref, 'A5:L8')
+        self.assertEqual(sheet['L10'].value, '=SUM(L6:L8)')
+        self.assertEqual(sheet['I10'].value, '=SUM(I6:I8)')
+        self.assertEqual(sheet.max_column, 12)
         self.assertEqual(sheet["A1"].font.name, "Arial")
         self.assertEqual(sheet["H6"].font.name, "Arial")
+        self.assertTrue(all(cell.font.name == 'Arial' for row in sheet for cell in row if cell.value is not None))
+        self.assertEqual(workbook._named_styles['Normal'].font.name, 'Arial')
+        from zipfile import ZipFile
+        with ZipFile(io.BytesIO(workbook_data)) as archive:
+            self.assertNotIn(b'<scheme', archive.read('xl/styles.xml'))
+        workbook.close()
 
 
 if __name__ == "__main__":
