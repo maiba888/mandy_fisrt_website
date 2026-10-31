@@ -54,10 +54,10 @@ HTTPS_ENABLED = os.environ.get("HTTPS", "0") == "1"
 PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "https://bebeauty.top").rstrip("/")
 
 SEO_SITE_NAME = "BeBeauty Wholesale Catalog"
-ASSET_VERSION = "20261022-shades2"
+ASSET_VERSION = "20261031-identity"
 FACTORY_UPLOAD_LOCK = threading.Lock()
 SEO_HOME_DESCRIPTION = (
-    "Browse wholesale cosmetics and beauty products by brand, category, SKU, "
+    "Browse wholesale cosmetics and beauty products by brand, category, "
     "shade and price. Create an order number for supplier confirmation."
 )
 SEO_FAQ = [
@@ -290,7 +290,6 @@ def seo_description(product):
         for part in [
             str(product.get("name") or "").strip(),
             f"by {str(product.get('brand') or '').strip()}" if product.get("brand") else "",
-            f"SKU {str(product.get('sku') or '').strip()}" if product.get("sku") else "",
         ]
         if part
     )
@@ -321,7 +320,7 @@ def build_product_page(product, related_products):
         "@type": "Product",
         "@id": canonical + "#product",
         "name": name,
-        "sku": sku,
+        "productID": str(product.get("id") or sku),
         "category": category,
         "description": description,
         "url": canonical,
@@ -413,7 +412,7 @@ def build_product_page(product, related_products):
         <article class="detail-layout">
           <div class="gallery"><div class="product-image">{image_html}</div></div>
           <section>
-            <p>{html.escape(brand)} · {html.escape(category)} · SKU {html.escape(sku)}</p>
+            <p>{html.escape(brand)} · {html.escape(category)}</p>
             <h1>{html.escape(name)}</h1>
             <p class="price">${price}</p>
             <h2>Product information</h2>
@@ -505,7 +504,6 @@ def build_catalog_page(products, query):
         cards.append(f'<article class="card"><a class="product-image" href="{url}">{picture}</a><div class="card-body">'
                      f'<div class="meta">{tags}</div><h3><a class="product-title-link" href="{url}">{name}</a></h3>'
                      f'<p class="desc">{html.escape(str(item.get("description") or ""))}</p>'
-                     f'<div class="card-signals"><span>SKU {html.escape(str(item.get("sku") or ""))}</span></div>'
                      f'<div class="price-row"><span class="price">${item["price"]:.2f}</span><a href="{url}">View product</a></div></div></article>')
     brands = sorted({p['brand'] for p in products if p.get('brand') and p['brand'] != 'All'}, key=str.casefold)
     categories = sorted({p['category'] for p in products if p.get('category') and p['category'] != 'All'}, key=str.casefold)
@@ -549,7 +547,7 @@ def normalize_product(data):
     product_id = str(data.get("id") or sku).strip()
     name = str(data.get("name") or "").strip()
     if not product_id or not sku or not name:
-        raise ValueError("SKU and Item Name are required.")
+        raise ValueError("Product ID and Item Name are required.")
     colors = data.get("colors") or []
     if isinstance(colors, str):
         colors = split_color_text(colors)
@@ -597,6 +595,8 @@ def unique_product_id(conn, preferred_id):
 
 def assign_unique_product_id(conn, data):
     sku = str(data.get("sku") or data.get("id") or "").strip()
+    if not sku:
+        sku = "product-" + secrets.token_hex(12)
     preferred = str(data.get("id") or sku).strip()
     data["id"] = unique_product_id(conn, preferred)
     if not data.get("sku"):
@@ -1081,17 +1081,16 @@ VALID_SHIPPING_COUNTRIES = {"Europe", "United States"}
 def normalize_order_items(cart_items):
     requested = {}
     for item in cart_items:
-        product_id = str(item.get("id") or item.get("sku") or "").strip()
-        sku = str(item.get("sku") or product_id).strip()
+        product_id = str(item.get("id") or "").strip()
         if not product_id:
             continue
         qty = max(1, int(float(item.get("qty") or 1)))
         color = str(item.get("color") or "Default").strip() or "Default"
-        key = (product_id, sku, color)
+        key = (product_id, color)
         requested[key] = requested.get(key, 0) + qty
     if not requested:
         raise ValueError("Cart is empty.")
-    return [{"id": product_id, "sku": sku, "color": color, "qty": qty} for (product_id, sku, color), qty in requested.items()]
+    return [{"id": product_id, "sku": product_id, "color": color, "qty": qty} for (product_id, color), qty in requested.items()]
 
 
 def products_by_id(product_ids):
@@ -1266,7 +1265,8 @@ def build_order_workbook_from_data(order):
         name = str(item.get("name") or "")
         image_url = str(item.get("image") or "")
         shade = str(item.get("color") or "Default").strip() or "Default"
-        key = (brand, name, round(unit_price, 6), image_url)
+        # Distinct product IDs must never merge, even with identical display fields.
+        key = (str(item.get("id") or ""), brand, name, round(unit_price, 6), image_url)
         group = grouped_index.get(key)
         if not group:
             group = {
@@ -1431,7 +1431,7 @@ def build_sales_report_workbook(rows):
     wb._fonts[0] = default_font
     wb._named_styles["Normal"].font = default_font
 
-    ws.merge_cells("A1:L1")
+    ws.merge_cells("A1:K1")
     ws["A1"] = "All Products Sales Statistics"
     ws["A1"].font = Font(name="Arial", family=2, size=16, bold=True)
     ws["A2"] = "All catalog products, sorted by Brand A-Z. Sort Units Sold to find the top 20."
@@ -1439,12 +1439,11 @@ def build_sales_report_workbook(rows):
     ws["A3"] = "Generated at"
     ws["B3"] = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(now()))
     ws["A3"].font = Font(name="Arial", family=2, bold=True)
-    ws.merge_cells("A4:L4")
+    ws.merge_cells("A4:K4")
     ws["A4"] = "Order details: enter one shade and quantity per line, for example 01 * 5 PCS."
 
     headers = [
         "Sales Rank",
-        "SKU",
         "Brand",
         "Item Name",
         "Picture",
@@ -1469,7 +1468,6 @@ def build_sales_report_workbook(rows):
         ws.append(
             [
                 item.get("sales_rank", position),
-                item["sku"],
                 item["brand"],
                 item["name"],
                 "",
@@ -1483,11 +1481,11 @@ def build_sales_report_workbook(rows):
             ]
         )
         ws.row_dimensions[row_number].height = 76
-        ws.cell(row_number, 10).data_type = "s"
+        ws.cell(row_number, 9).data_type = "s"
+        ws.cell(row_number, 9).number_format = "@"
         ws.cell(row_number, 10).number_format = "@"
-        ws.cell(row_number, 11).number_format = "@"
-        ws.cell(row_number, 11).fill = PatternFill("solid", fgColor="EAF3FF")
-        shade_lines = ws.cell(row_number, 10).value.count("\n") + 1
+        ws.cell(row_number, 10).fill = PatternFill("solid", fgColor="EAF3FF")
+        shade_lines = ws.cell(row_number, 9).value.count("\n") + 1
         ws.row_dimensions[row_number].height = min(409, max(76, shade_lines * 14 + 8))
         image_path = make_thumbnail(item["image"], 96)
         if image_path:
@@ -1498,37 +1496,36 @@ def build_sales_report_workbook(rows):
                     image.height = int(image.height * (target_width / image.width))
                     image.width = target_width
                     ws.row_dimensions[row_number].height = max(ws.row_dimensions[row_number].height, image.height * 0.75 + 8)
-                ws.add_image(image, f"E{row_number}")
+                ws.add_image(image, f"D{row_number}")
             except Exception:
                 pass
 
     data_end_row = max(header_row + 1, header_row + len(rows))
     totals_row = header_row + len(rows) + 2
-    ws.cell(totals_row, 8, "All products total")
+    ws.cell(totals_row, 7, "All products total")
+    ws.cell(totals_row, 7).font = Font(name="Arial", family=2, bold=True)
+    ws.cell(totals_row, 8, f"=SUM(H{header_row + 1}:H{data_end_row})")
+    ws.cell(totals_row, 8).number_format = "$0.00"
     ws.cell(totals_row, 8).font = Font(name="Arial", family=2, bold=True)
-    ws.cell(totals_row, 9, f"=SUM(I{header_row + 1}:I{data_end_row})")
-    ws.cell(totals_row, 9).number_format = "$0.00"
-    ws.cell(totals_row, 9).font = Font(name="Arial", family=2, bold=True)
-    ws.cell(totals_row, 12, f"=SUM(L{header_row + 1}:L{data_end_row})")
-    ws.cell(totals_row, 12).font = Font(name="Arial", family=2, bold=True)
+    ws.cell(totals_row, 11, f"=SUM(K{header_row + 1}:K{data_end_row})")
+    ws.cell(totals_row, 11).font = Font(name="Arial", family=2, bold=True)
 
     widths = {
         "A": 12,
-        "B": 20,
-        "C": 18,
-        "D": 52,
+        "B": 18,
+        "C": 52,
+        "D": 14,
         "E": 14,
-        "F": 14,
-        "G": 12,
-        "H": 14,
-        "I": 20,
-        "J": 36,
-        "K": 30,
-        "L": 14,
+        "F": 12,
+        "G": 14,
+        "H": 20,
+        "I": 36,
+        "J": 30,
+        "K": 14,
     }
     for column, width in widths.items():
         ws.column_dimensions[column].width = width
-    for row in ws.iter_rows(min_row=header_row, max_row=ws.max_row, min_col=1, max_col=12):
+    for row in ws.iter_rows(min_row=header_row, max_row=ws.max_row, min_col=1, max_col=11):
         for cell in row:
             cell.alignment = Alignment(vertical="center", wrap_text=True)
             font = copy(cell.font)
@@ -1538,12 +1535,12 @@ def build_sales_report_workbook(rows):
             font.charset = None
             cell.font = font
     for row in range(header_row + 1, header_row + len(rows) + 1):
-        ws[f"F{row}"].number_format = "$0.00"
-        ws[f"H{row}"].number_format = "#,##0"
-        ws[f"I{row}"].number_format = "$0.00"
-        ws[f"L{row}"].number_format = "#,##0"
+        ws[f"E{row}"].number_format = "$0.00"
+        ws[f"G{row}"].number_format = "#,##0"
+        ws[f"H{row}"].number_format = "$0.00"
+        ws[f"K{row}"].number_format = "#,##0"
     ws.freeze_panes = "A6"
-    ws.auto_filter.ref = f"A{header_row}:L{header_row + max(len(rows), 1)}"
+    ws.auto_filter.ref = f"A{header_row}:K{header_row + max(len(rows), 1)}"
     wb.calculation.fullCalcOnLoad = True
     wb.calculation.forceFullCalc = True
     wb.calculation.calcMode = "auto"
@@ -1857,7 +1854,7 @@ class CatalogHandler(BaseHTTPRequestHandler):
 
 - Major brands: {brand_text}
 - Categories: {category_text}
-- Product pages include SKU, brand, category, USD price, shade choices, product information and images.
+- Product pages include brand, category, USD price, shade choices, product information and images.
 
 ## Ordering
 
@@ -1956,10 +1953,11 @@ Use the cart on {PUBLIC_BASE_URL}/ to create an order number, then continue the 
             data = read_json(self)
             data["id"] = product_id
             with connect() as conn:
-                existing = conn.execute("SELECT archived_at FROM products WHERE id = ?", (product_id,)).fetchone()
+                existing = conn.execute("SELECT archived_at, sku FROM products WHERE id = ?", (product_id,)).fetchone()
                 if not existing:
                     return json_response(self, 404, {"error": "Product not found"})
                 # Editing an archive preserves its state; only explicit restore publishes it.
+                data["sku"] = data.get("sku") or existing["sku"]
                 data["archived_at"] = existing["archived_at"]
                 if existing["archived_at"]:
                     data["published"] = False

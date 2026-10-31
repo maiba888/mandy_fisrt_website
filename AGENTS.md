@@ -2,6 +2,14 @@
 
 ## Operational Override - 2026-10-24
 
+- 2026-10-31 product identity: use stable product IDs exclusively in cart lookup
+  and ordering, never an OR/fallback match on SKU. Different IDs must remain
+  separate in order Excel even when names/prices/images match. Group shades
+  only within a product ID (legacy orders without IDs retain display grouping).
+  SKU is retired from visible UI, admin inputs and catalog exports. Keep the
+  legacy database column for compatibility, generate IDs server-side for new
+  products, and preserve existing IDs/SKUs on edits. Do not migrate/delete data.
+
 - The owner has retired Alibaba backups and replication for this project.
   `luxe-replication.timer` on Tencent is disabled and stopped. Do not start the
   replication service, re-enable its timer, or copy code/data/images to Alibaba

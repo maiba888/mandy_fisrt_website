@@ -3,7 +3,7 @@
   const ADMIN_PAGE_SIZE = 80;
   const SITE_NAME = "BeBeauty Wholesale Catalog";
   const PUBLIC_ORIGIN = "https://bebeauty.top";
-  const HOME_DESCRIPTION = "Browse wholesale cosmetics and beauty products by brand, category, SKU, shade and price. Create an order number for supplier confirmation.";
+  const HOME_DESCRIPTION = "Browse wholesale cosmetics and beauty products by brand, category, shade and price. Create an order number for supplier confirmation.";
 
   function productIdFromPath() {
     const match = location.pathname.match(/^\/product\/(.+?)\/?$/);
@@ -334,7 +334,7 @@
 
   function cartLines() {
     return cart.map((item) => {
-      const product = products.find((p) => p.id === item.id || p.sku === item.sku);
+      const product = products.find((p) => p.id === item.id);
       const merged = product ? { ...item, ...product, color: item.color, qty: item.qty, key: item.key } : item;
       return {
         ...merged,
@@ -414,7 +414,7 @@
         ${matchingProducts.map((p) => `
           <button type="button" data-detail="${escapeHTML(p.id)}">
             <span class="suggest-thumb">${p.image ? `<img src="${escapeHTML(p.image)}" alt="${escapeHTML(p.name)}" loading="lazy" decoding="async">` : escapeHTML(p.brand.slice(0, 2))}</span>
-            <span><strong>${escapeHTML(p.name)}</strong><small>${escapeHTML(p.sku)} · ${escapeHTML(p.brand)}</small></span>
+            <span><strong>${escapeHTML(p.name)}</strong><small>${escapeHTML(p.brand)}</small></span>
           </button>`).join("")}
         ${matchingBrands.map((brand) => `<button type="button" data-filter-brand="${escapeHTML(brand)}"><span class="suggest-chip">Brand</span><span>${escapeHTML(brand)}</span></button>`).join("")}
         ${matchingCategories.map((category) => `<button type="button" data-filter-category="${escapeHTML(category)}"><span class="suggest-chip">Category</span><span>${escapeHTML(category)}</span></button>`).join("")}
@@ -449,7 +449,7 @@
             <div class="thumb">${product.image ? `<img src="${escapeHTML(product.image)}" alt="${escapeHTML(product.name)}" loading="eager" decoding="async">` : escapeHTML(product.brand.slice(0, 2))}</div>
             <div>
               <h3>${escapeHTML(product.name)}</h3>
-              <p class="small">${escapeHTML(product.sku)} · ${escapeHTML(product.brand)} · ${money(product.price)}</p>
+              <p class="small">${escapeHTML(product.brand)} · ${money(product.price)}</p>
             </div>
           </div>
           <label class="field">
@@ -509,7 +509,7 @@
   }
 
   function metadataDescription(product) {
-    const identity = `${product.name} by ${product.brand}, SKU ${product.sku}.`;
+    const identity = `${product.name} by ${product.brand}.`;
     const description = String(product.description || "").replace(/\s+/g, " ").trim();
     return `${identity} ${description} Wholesale beauty catalog with shade selection and order-number confirmation.`
       .slice(0, 158)
@@ -545,7 +545,7 @@
     const organization = { "@type": "Organization", "@id": `${PUBLIC_ORIGIN}/#organization`, name: SITE_NAME, alternateName: "Luxe Trade Catalog", url: `${PUBLIC_ORIGIN}/` };
     const graph = [organization, { "@type": "WebSite", "@id": `${PUBLIC_ORIGIN}/#website`, name: SITE_NAME, url: `${PUBLIC_ORIGIN}/`, publisher: { "@id": organization["@id"] } }];
     if (product) {
-      graph.push({ "@type": "Product", "@id": `${canonical}#product`, name: product.name, sku: product.sku, category: product.category, description, url: canonical,
+      graph.push({ "@type": "Product", "@id": `${canonical}#product`, name: product.name, category: product.category, description, url: canonical,
         brand: { "@type": "Brand", name: product.brand }, ...(image ? { image: productImages(product).map((value) => new URL(value, PUBLIC_ORIGIN).href) } : {}),
         offers: { "@type": "Offer", url: canonical, priceCurrency: "USD", price: Number(product.price).toFixed(2), seller: { "@id": organization["@id"] } } });
       graph.push({ "@type": "BreadcrumbList", itemListElement: [["Wholesale beauty products", `${PUBLIC_ORIGIN}/`], [product.brand, new URL(collectionPath("brand", product.brand), PUBLIC_ORIGIN).href], [product.name, canonical]].map(([name, item], index) => ({ "@type": "ListItem", position: index + 1, name, item })) });
@@ -655,7 +655,7 @@
       ${brandRailHTML(visibleProducts)}
       <div class="catalog-sticky">
         <section class="toolbar" id="products">
-          <label class="filter-field search-field"><span>Search</span><input class="search" data-action="search" placeholder="Search SKU, brand, product..." value="${escapeHTML(state.search)}">${searchSuggestions()}</label>
+          <label class="filter-field search-field"><span>Search</span><input class="search" data-action="search" placeholder="Search brand, product..." value="${escapeHTML(state.search)}">${searchSuggestions()}</label>
           <button type="button" class="new-arrivals ${state.newArrivals ? "active" : ""}" data-new-arrivals aria-pressed="${state.newArrivals}">NEW ARRIVALS</button>
           <label class="filter-field"><span>Brand</span><select data-action="brand">${brands().map((b) => `<option ${b === state.brand ? "selected" : ""}>${escapeHTML(b)}</option>`).join("")}</select></label>
           <label class="filter-field"><span>Category</span><select data-action="category">${categories().map((c) => `<option ${c === state.category ? "selected" : ""}>${escapeHTML(c)}</option>`).join("")}</select></label>
@@ -710,7 +710,7 @@
           </div>
           <h3><a class="product-title-link" href="${escapeHTML(productPath(p.id))}" data-detail="${escapeHTML(p.id)}">${escapeHTML(p.name)}</a>${p.is_best_seller ? ' <span class="best-seller">best seller</span>' : ""}</h3>
           <p class="desc">${escapeHTML(p.description)}</p>
-          <div class="card-signals"><span>${options.length} shade${options.length === 1 ? "" : "s"}</span><span>SKU ${escapeHTML(p.sku)}</span></div>
+          <div class="card-signals"><span>${options.length} shade${options.length === 1 ? "" : "s"}</span></div>
           ${cartStatusForProduct(p.id)}
           <div class="price-row"><span class="price">${money(p.price)}</span><button class="primary quick-button" data-quick-add="${escapeHTML(p.id)}">Quick add</button></div>
         </div>
@@ -739,7 +739,7 @@
               </button>`).join("")}</div>` : ""}
           </div>
           <section>
-            <div class="meta"><span class="tag">${escapeHTML(p.brand)}</span><span class="tag">${escapeHTML(p.category)}</span><span class="tag">SKU ${escapeHTML(p.sku)}</span></div>
+            <div class="meta"><span class="tag">${escapeHTML(p.brand)}</span><span class="tag">${escapeHTML(p.category)}</span></div>
             <h1>${escapeHTML(p.name)}</h1>
             <p class="price">${money(p.price)}</p>
             ${productInformation(p)}
@@ -857,7 +857,7 @@
     return `
       <div class="cart-item">
         <div class="thumb">${item.image ? `<img src="${escapeHTML(item.image)}" alt="${escapeHTML(item.name)}" loading="lazy" decoding="async">` : escapeHTML(item.brand.slice(0, 2))}</div>
-        <div><strong>${escapeHTML(item.name)}</strong><div class="small">${escapeHTML(item.sku)} · ${escapeHTML(item.color || "Default")} · ${weight(item.weight * item.qty)}</div></div>
+        <div><strong>${escapeHTML(item.name)}</strong><div class="small">${escapeHTML(item.color || "Default")} · ${weight(item.weight * item.qty)}</div></div>
         <input type="number" min="1" value="${item.qty}" data-cart-qty="${index}">
         <div><strong>${money(item.qty * item.price)}</strong><div class="small">${money(item.price)} each</div></div>
         <button class="ghost" data-remove-cart="${index}">Remove</button>
@@ -884,7 +884,6 @@
           country: state.shippingCountry,
           items: totals.lines.map((item) => ({
             id: item.id,
-            sku: item.sku,
             color: item.color || "Default",
             qty: item.qty,
           })),
@@ -939,7 +938,6 @@
             <h3>${editing ? "Edit product" : "Create product"}</h3>
             ${field("WhatsApp receiving number", `<input name="whatsapp" placeholder="8613800000000" value="${escapeHTML(whatsappNumber)}">`)}
             <hr style="border:0;border-top:1px solid var(--line);width:100%;">
-            ${field("SKU", `<input name="sku" placeholder="SKU" required value="${escapeHTML(p.sku)}">`)}
             ${field("Brand", `<input name="brand" list="admin-brand-options" placeholder="Type 1-2 letters or enter a new brand" autocomplete="off" required value="${escapeHTML(p.brand)}"><datalist id="admin-brand-options">${brandOptionsHtml}</datalist>`)}
             ${field("Item Name", `<input name="name" placeholder="Item Name" required value="${escapeHTML(p.name)}">`)}
             ${field("Category", `<input name="category" placeholder="Category" value="${escapeHTML(p.category)}">`)}
@@ -960,7 +958,7 @@
           <section class="panel">
             <h3>${adminProducts.length} / ${products.length} products</h3>
             <div class="admin-catalog-filters">
-              ${field("Search products", `<input data-action="admin-search" placeholder="Search SKU, name, brand, category..." value="${escapeHTML(state.adminSearch)}">`)}
+              ${field("Search products", `<input data-action="admin-search" placeholder="Search name, brand, category..." value="${escapeHTML(state.adminSearch)}">`)}
               ${field("Product status", `<select data-action="admin-product-status">${[["active", "Active"], ["draft", "Drafts"], ["archived", "Archived"], ["all", "All products"]].map(([value, label]) => `<option value="${value}" ${state.adminProductStatus === value ? "selected" : ""}>${label}</option>`).join("")}</select>`)}
             </div>
             ${adminPaginationHTML(adminProducts.length, pageStart, pageItems.length, adminTotalPages)}
@@ -1213,7 +1211,6 @@
 
   function validateAdminProductForm(form, data) {
     const required = [
-      ["sku", "SKU is required."],
       ["brand", "Brand is required."],
       ["name", "Item Name is required."],
       ["price", "Price (USD) is required."],
@@ -1293,7 +1290,7 @@
                 <td>
                   <div class="sales-product-cell">
                     <div class="sales-report-thumb">${row.image ? `<img src="${escapeHTML(adminThumbSrc(row.image))}" alt="${escapeHTML(row.name)}" loading="lazy" decoding="async">` : escapeHTML(String(row.brand || "").slice(0, 2))}</div>
-                    <div><strong>${escapeHTML(row.name)}</strong><span>${escapeHTML(row.sku)} · ${escapeHTML(row.brand)}</span></div>
+                    <div><strong>${escapeHTML(row.name)}</strong><span>${escapeHTML(row.brand)}</span></div>
                   </div>
                 </td>
                 <td><strong>${Number(row.units_sold || 0).toLocaleString()}</strong></td>
@@ -1310,7 +1307,7 @@
     return `
       <div class="admin-row">
         <div class="thumb">${p.image ? `<img src="${escapeHTML(adminThumbSrc(p.image))}" alt="${escapeHTML(p.name)}" loading="lazy" decoding="async">` : escapeHTML(p.brand.slice(0, 2))}</div>
-        <div><strong>${escapeHTML(p.name)}</strong><div class="small">${escapeHTML(p.sku)} · ${escapeHTML(p.brand)} · ${p.archived_at ? "Archived" : p.published === false ? "Draft" : "Published"}</div></div>
+        <div><strong>${escapeHTML(p.name)}</strong><div class="small">${escapeHTML(p.brand)} · ${p.archived_at ? "Archived" : p.published === false ? "Draft" : "Published"}</div></div>
         <div>${money(p.price)}</div>
         <button class="ghost" data-edit="${escapeHTML(p.id)}">Edit</button>
         ${p.archived_at ? `<button class="primary" data-restore="${escapeHTML(p.id)}">Restore &amp; publish</button>` : `<button class="ghost" data-delete="${escapeHTML(p.id)}">Archive</button>`}
@@ -1731,8 +1728,7 @@
     whatsappNumber = String(data.whatsapp || whatsappNumber).replace(/[^\d]/g, "") || whatsappNumber;
     const colorOptions = cleanColorList(splitColorText(data.colors));
     const product = {
-      id: data.sku.trim(),
-      sku: data.sku.trim(),
+      id: state.editingId || undefined,
       brand: data.brand.trim(),
       name: data.name.trim(),
       category: data.category.trim() || "Cosmetics",
@@ -1745,7 +1741,7 @@
       images: cleanImageList(String(data.images || "").split(/\n|,/)).map(normalizeAssetUrl),
       published: data.published === "on",
     };
-    if (!product.sku || !product.name) return;
+    if (!product.name) return;
     const feedback = form.querySelector("[data-save-feedback]");
     const submitButton = form.querySelector('button[type="submit"]');
     if (feedback) {
