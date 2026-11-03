@@ -54,7 +54,7 @@ HTTPS_ENABLED = os.environ.get("HTTPS", "0") == "1"
 PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "https://bebeauty.top").rstrip("/")
 
 SEO_SITE_NAME = "BeBeauty Wholesale Catalog"
-ASSET_VERSION = "20261031-identity"
+ASSET_VERSION = "20261103-availability"
 FACTORY_UPLOAD_LOCK = threading.Lock()
 SEO_HOME_DESCRIPTION = (
     "Browse wholesale cosmetics and beauty products by brand, category, "
@@ -1103,6 +1103,16 @@ def products_by_id(product_ids):
     return {row["id"]: product_from_row(row) for row in rows}
 
 
+def validate_order_availability(items, product_map):
+    unavailable = []
+    for product_id in dict.fromkeys(item["id"] for item in items):
+        product = product_map.get(product_id)
+        if not product or not product.get("published", True) or product.get("archived_at"):
+            unavailable.append(str((product or {}).get("name") or product_id))
+    if unavailable:
+        raise ValueError("These products are no longer available. Remove them from your cart: " + "; ".join(unavailable))
+
+
 def prepare_order_data(cart_items, country):
     country = str(country or "Europe").strip()
     if country not in VALID_SHIPPING_COUNTRIES:
@@ -1110,6 +1120,7 @@ def prepare_order_data(cart_items, country):
 
     order_items = normalize_order_items(cart_items)
     product_map = products_by_id([item["id"] for item in order_items])
+    validate_order_availability(order_items, product_map)
     lines = []
     product_total = 0
     total_weight = 0
@@ -1164,6 +1175,14 @@ def create_order_record(cart_items, country):
     order = prepare_order_data(cart_items, country)
     created_at = now()
     with connect() as conn:
+        # Serialize final availability validation with archive/unpublish writes.
+        conn.execute("BEGIN IMMEDIATE")
+        ids = [item["id"] for item in order["items"]]
+        placeholders = ",".join("?" for _ in ids)
+        current = conn.execute(
+            f"SELECT id, name, published, archived_at FROM products WHERE id IN ({placeholders})", ids
+        ).fetchall()
+        validate_order_availability(order["items"], {row["id"]: dict(row) for row in current})
         for _ in range(5):
             order_no = generate_order_no()
             try:

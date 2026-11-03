@@ -2,6 +2,13 @@
 
 ## Operational Override - 2026-10-24
 
+- 2026-11-03 availability: reject archived, unpublished and missing products
+  when preparing orders; recheck under BEGIN IMMEDIATE before inserting orders.
+  No admin-session bypass. Old carts must mark unavailable items and block
+  checkout until removed. Refresh catalog before submission; never fall back
+  to the retired static catalog on API failure. Historical order exports remain
+  based on stored snapshots and must still work after products are archived.
+
 - 2026-10-31 product identity: use stable product IDs exclusively in cart lookup
   and ordering, never an OR/fallback match on SKU. Different IDs must remain
   separate in order Excel even when names/prices/images match. Group shades

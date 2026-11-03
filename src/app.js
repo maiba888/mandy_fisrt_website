@@ -195,9 +195,9 @@
       whatsappNumber = settingsPayload.settings?.whatsapp || whatsappNumber;
       apiOnline = true;
     } catch (error) {
-      products = initialProducts;
+      products = [];
       apiOnline = false;
-      console.warn("API unavailable, using static catalog fallback.", error);
+      console.warn("Catalog unavailable; ordering is disabled until it can be verified.", error);
     } finally {
       state.loading = false;
     }
@@ -206,6 +206,7 @@
   async function refreshProducts() {
     const payload = await apiFetch(`/api/products?include_drafts=${isAdminAuthed ? "1" : "0"}&include_archived=${isAdminAuthed ? "1" : "0"}`);
     products = (payload.products || []).map(normalizeProduct);
+    apiOnline = true;
   }
 
   async function loadSalesReport() {
@@ -338,6 +339,7 @@
       const merged = product ? { ...item, ...product, color: item.color, qty: item.qty, key: item.key } : item;
       return {
         ...merged,
+        available: Boolean(product && product.published !== false && !product.archived_at),
         price: Number(merged.price || 0),
         weight: Number(merged.weight || 0),
         qty: Math.max(1, Number(merged.qty || 1)),
@@ -376,10 +378,11 @@
 
   function cartTotals() {
     const lines = cartLines();
-    const productTotal = lines.reduce((sum, item) => sum + item.qty * item.price, 0);
-    const totalWeight = lines.reduce((sum, item) => sum + item.qty * Number(item.weight || 0), 0);
-    const shippingWeight = lines.length ? billableShippingWeight(state.shippingCountry, totalWeight) : 0;
-    const shipping = lines.length ? shippingCost(state.shippingCountry, shippingWeight) : 0;
+    const available = lines.filter((item) => item.available);
+    const productTotal = available.reduce((sum, item) => sum + item.qty * item.price, 0);
+    const totalWeight = available.reduce((sum, item) => sum + item.qty * Number(item.weight || 0), 0);
+    const shippingWeight = available.length ? billableShippingWeight(state.shippingCountry, totalWeight) : 0;
+    const shipping = available.length ? shippingCost(state.shippingCountry, shippingWeight) : 0;
     return { lines, productTotal, totalWeight, shippingWeight, shipping, total: productTotal + shipping };
   }
 
@@ -794,6 +797,7 @@
 
   function renderCart() {
     const totals = cartTotals();
+    const unavailable = totals.lines.some((item) => !item.available);
     const grouped = cartGroups(totals.lines);
     layout(`
       <main class="cart-page">
@@ -816,7 +820,8 @@
               <div><span>TOTAL</span><strong>${money(totals.total)}</strong></div>
             </div>
             ${state.orderStatus ? `<div class="notice">${escapeHTML(state.orderStatus)}</div>` : ""}
-            <button class="primary" style="width:100%;margin-bottom:10px;" data-create-order>Create order & Contact Supplier</button>
+            ${unavailable ? `<div class="notice" role="alert">Some products are no longer available. Remove the unavailable items before ordering.</div>` : !apiOnline ? `<div class="notice" role="alert">Unable to verify the catalog. Refresh the page before ordering.</div>` : ""}
+            <button class="primary" style="width:100%;margin-bottom:10px;" data-create-order ${unavailable || !apiOnline ? "disabled" : ""}>Create order & Contact Supplier</button>
             <button class="ghost" style="width:100%;" data-clear-cart>Clear cart</button>
             <p class="small">The order will be saved on the server. WhatsApp will open with the order number only. Current receiving number: ${escapeHTML(whatsappNumber)}.</p>
           </div>
@@ -836,8 +841,10 @@
       }
       const group = byBrand.get(brand);
       group.lines.push({ ...line, cartIndex: index });
-      group.subtotal += line.qty * line.price;
-      group.weight += line.qty * Number(line.weight || 0);
+      if (line.available) {
+        group.subtotal += line.qty * line.price;
+        group.weight += line.qty * Number(line.weight || 0);
+      }
     });
     return groups;
   }
@@ -857,7 +864,7 @@
     return `
       <div class="cart-item">
         <div class="thumb">${item.image ? `<img src="${escapeHTML(item.image)}" alt="${escapeHTML(item.name)}" loading="lazy" decoding="async">` : escapeHTML(item.brand.slice(0, 2))}</div>
-        <div><strong>${escapeHTML(item.name)}</strong><div class="small">${escapeHTML(item.color || "Default")} · ${weight(item.weight * item.qty)}</div></div>
+        <div><strong>${escapeHTML(item.name)}</strong>${!item.available ? `<div class="notice" role="alert">No longer available</div>` : ""}<div class="small">${escapeHTML(item.color || "Default")} · ${weight(item.weight * item.qty)}</div></div>
         <input type="number" min="1" value="${item.qty}" data-cart-qty="${index}">
         <div><strong>${money(item.qty * item.price)}</strong><div class="small">${money(item.price)} each</div></div>
         <button class="ghost" data-remove-cart="${index}">Remove</button>
@@ -877,7 +884,11 @@
     state.orderStatus = "Creating order...";
     renderCart();
     try {
+      await refreshProducts();
       const totals = cartTotals();
+      if (totals.lines.some((item) => !item.available)) {
+        throw new Error("Some products are no longer available. Remove the marked items before ordering.");
+      }
       const result = await apiFetch("/api/orders", {
         method: "POST",
         body: JSON.stringify({
