@@ -23,7 +23,7 @@ class ProductIdentityTests(test_archives.ArchiveTests):
     def test_order_ids_with_duplicate_sku_are_independent(self):
         products = {
             'one': dict(id='one', sku='RD-2', name='Eye patches', brand='rhode', price=3.68, weight=.1),
-            'two': dict(id='two', sku='RD-2', name='Lip set', brand='rhode', price=4.2, weight=.2),
+            'two': dict(id='two', sku='RD-2', name='Lip set', brand='rhode', price=4.2, weight=.2, colors=['lip set']),
         }
         with patch.object(server, 'products_by_id', return_value=products):
             order = server.prepare_order_data([dict(id='one',sku='RD-2',qty=5,color='default'),

@@ -54,7 +54,7 @@ HTTPS_ENABLED = os.environ.get("HTTPS", "0") == "1"
 PUBLIC_BASE_URL = os.environ.get("PUBLIC_BASE_URL", "https://bebeauty.top").rstrip("/")
 
 SEO_SITE_NAME = "BeBeauty Wholesale Catalog"
-ASSET_VERSION = "20261103-availability"
+ASSET_VERSION = "20261103-order-validation"
 FACTORY_UPLOAD_LOCK = threading.Lock()
 SEO_HOME_DESCRIPTION = (
     "Browse wholesale cosmetics and beauty products by brand, category, "
@@ -149,7 +149,10 @@ def read_json_limited(handler, max_bytes):
     if not length:
         return {}
     raw = handler.rfile.read(length)
-    return json.loads(raw.decode("utf-8"))
+    data = json.loads(raw.decode("utf-8"))
+    if not isinstance(data, dict):
+        raise ValueError("Request body must be a JSON object.")
+    return data
 
 
 def parse_multipart_upload(handler, max_bytes):
@@ -540,6 +543,43 @@ def build_ordering_page():
 
 def split_color_text(value):
     return [item.strip() for item in str(value or "").split("/") if item.strip()]
+
+
+def product_shades(product):
+    colors = product.get("colors") or []
+    if isinstance(colors, str):
+        colors = [colors]
+    options = [shade for value in colors for shade in split_color_text(value)]
+    if not options:
+        match = re.search(r"colou?rs?\s*[:：]\s*(.*)", str(product.get("description") or ""), re.I)
+        if match:
+            raw = re.split(r"\s+(?:size|gross\s*weight|gross|net\s*(?:weight|wet|wight)|weight)\s*[:：]?",
+                           match[1], maxsplit=1, flags=re.I)[0]
+            options = split_color_text(raw)
+    return list(dict.fromkeys(options)) or ["Default"]
+
+
+def positive_number(value, label):
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError(f"{label} must be a finite number greater than zero.") from None
+    if isinstance(value, bool) or not math.isfinite(number) or number <= 0:
+        raise ValueError(f"{label} must be a finite number greater than zero.")
+    return number
+
+
+def validate_product_input(data):
+    if "published" in data and not isinstance(data["published"], bool):
+        raise ValueError("Published must be true or false.")
+    for field, label in (("brand", "Brand"), ("name", "Item Name")):
+        if not str(data.get(field) or "").strip():
+            raise ValueError(f"{label} is required.")
+    values = data.get("colors") if isinstance(data.get("colors"), list) else [data.get("colors")]
+    if not any(split_color_text(value) for value in values):
+        raise ValueError("Colors / shade options is required.")
+    positive_number(data.get("price"), "Price (USD)")
+    positive_number(data.get("weight"), "Weight (kg)")
 
 
 def normalize_product(data):
@@ -1079,27 +1119,36 @@ VALID_SHIPPING_COUNTRIES = {"Europe", "United States"}
 
 
 def normalize_order_items(cart_items):
+    if not isinstance(cart_items, list) or not cart_items:
+        raise ValueError("Cart is empty.")
     requested = {}
     for item in cart_items:
+        if not isinstance(item, dict):
+            raise ValueError("Each cart item must be an object.")
         product_id = str(item.get("id") or "").strip()
         if not product_id:
-            continue
-        qty = max(1, int(float(item.get("qty") or 1)))
+            raise ValueError("Every cart item must have a product ID.")
+        number = positive_number(item.get("qty", 1), "Quantity")
+        if not number.is_integer() or number > 9007199254740991:
+            raise ValueError("Quantity must be a positive whole number within the supported range.")
+        qty = int(number)
         color = str(item.get("color") or "Default").strip() or "Default"
         key = (product_id, color)
         requested[key] = requested.get(key, 0) + qty
+        if requested[key] > 9007199254740991:
+            raise ValueError("Combined quantity exceeds the supported range.")
     if not requested:
         raise ValueError("Cart is empty.")
     return [{"id": product_id, "sku": product_id, "color": color, "qty": qty} for (product_id, color), qty in requested.items()]
 
 
-def products_by_id(product_ids):
+def products_by_id(product_ids, conn=None):
     unique_ids = sorted({product_id for product_id in product_ids if product_id})
     if not unique_ids:
         return {}
     placeholders = ",".join("?" for _ in unique_ids)
-    with connect() as conn:
-        rows = conn.execute(f"SELECT * FROM products WHERE id IN ({placeholders})", unique_ids).fetchall()
+    db = conn if conn is not None else connect()
+    rows = db.execute(f"SELECT * FROM products WHERE id IN ({placeholders})", unique_ids).fetchall()
     return {row["id"]: product_from_row(row) for row in rows}
 
 
@@ -1113,13 +1162,13 @@ def validate_order_availability(items, product_map):
         raise ValueError("These products are no longer available. Remove them from your cart: " + "; ".join(unavailable))
 
 
-def prepare_order_data(cart_items, country):
+def prepare_order_data(cart_items, country, conn=None):
     country = str(country or "Europe").strip()
     if country not in VALID_SHIPPING_COUNTRIES:
         raise ValueError("Shipping country must be Europe or United States.")
 
     order_items = normalize_order_items(cart_items)
-    product_map = products_by_id([item["id"] for item in order_items])
+    product_map = products_by_id([item["id"] for item in order_items], conn=conn)
     validate_order_availability(order_items, product_map)
     lines = []
     product_total = 0
@@ -1131,12 +1180,20 @@ def prepare_order_data(cart_items, country):
             raise ValueError(f"Product not found: {product_id}")
         sku = product.get("sku") or item["sku"] or product_id
         qty = item["qty"]
-        unit_price = float(product.get("price") or 0)
-        unit_weight = float(product.get("weight") or 0)
+        options = product_shades(product)
+        if item["color"] not in options:
+            if options == ["Default"] and item["color"].lower() == "default":
+                item["color"] = "Default"
+            else:
+                raise ValueError(f"Shade/type is no longer available for {product.get('name') or product_id}: {item['color']}. Remove it and choose a current option.")
+        unit_price = positive_number(product.get("price"), "Product price")
+        unit_weight = positive_number(product.get("weight"), "Product weight")
         extended = unit_price * qty
         line_weight = unit_weight * qty
         product_total += extended
         total_weight += line_weight
+        if not math.isfinite(product_total) or not math.isfinite(total_weight):
+            raise ValueError("Order totals exceed the supported range.")
         lines.append(
             {
                 "id": product.get("id") or product_id,
@@ -1172,11 +1229,11 @@ def generate_order_no():
 
 
 def create_order_record(cart_items, country):
-    order = prepare_order_data(cart_items, country)
     created_at = now()
     with connect() as conn:
-        # Serialize final availability validation with archive/unpublish writes.
+        # Read prices, shades, weights and availability in the same write transaction.
         conn.execute("BEGIN IMMEDIATE")
+        order = prepare_order_data(cart_items, country, conn=conn)
         ids = [item["id"] for item in order["items"]]
         placeholders = ",".join("?" for _ in ids)
         current = conn.execute(
@@ -1959,7 +2016,9 @@ Use the cart on {PUBLIC_BASE_URL}/ to create an order number, then continue the 
     def handle_product_create(self):
         try:
             data = read_json(self)
+            validate_product_input(data)
             with connect() as conn:
+                conn.execute("BEGIN IMMEDIATE")
                 assign_unique_product_id(conn, data)
                 product_id = upsert_product(conn, data)
                 conn.commit()
@@ -1970,13 +2029,15 @@ Use the cart on {PUBLIC_BASE_URL}/ to create an order number, then continue the 
     def handle_product_update(self, product_id):
         try:
             data = read_json(self)
+            validate_product_input(data)
             data["id"] = product_id
             with connect() as conn:
+                conn.execute("BEGIN IMMEDIATE")
                 existing = conn.execute("SELECT archived_at, sku FROM products WHERE id = ?", (product_id,)).fetchone()
                 if not existing:
                     return json_response(self, 404, {"error": "Product not found"})
                 # Editing an archive preserves its state; only explicit restore publishes it.
-                data["sku"] = data.get("sku") or existing["sku"]
+                data["sku"] = existing["sku"]
                 data["archived_at"] = existing["archived_at"]
                 if existing["archived_at"]:
                     data["published"] = False

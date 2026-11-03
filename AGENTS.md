@@ -2,6 +2,16 @@
 
 ## Operational Override - 2026-10-24
 
+- 2026-11-03 order validation: prices, weights, shades and availability are read
+  inside the same BEGIN IMMEDIATE transaction as order insertion. Reject removed
+  shades, nonpositive/nonfinite values, fractional/invalid quantities and malformed
+  lines; never silently skip lines or coerce quantities. Shade validation mirrors
+  browser slash-only splitting and legacy description fallback. Admin saves and
+  new-ID assignment also lock before reading state; edits preserve legacy SKU.
+  Validate required fields and numeric values server-side as well as in the UI.
+  Disable repeat checkout clicks while pending. Run scripts/test_order_validation.py,
+  scripts/test_cart_availability.cjs and scripts/test_checkout_submission.cjs.
+
 - 2026-11-03 availability: reject archived, unpublished and missing products
   when preparing orders; recheck under BEGIN IMMEDIATE before inserting orders.
   No admin-session bypass. Old carts must mark unavailable items and block

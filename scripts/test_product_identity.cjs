@@ -9,6 +9,8 @@ const products = [
 ];
 const cart = products.map(p => ({id:p.id, sku:p.sku, key:p.id+'__default', color:'default', qty:5}));
 const context = vm.createContext({products,cart});
+vm.runInContext(source.slice(source.indexOf('  function cleanColorList('),source.indexOf('  function normalizeAssetUrl(')),context);
+vm.runInContext(source.slice(source.indexOf('  function shadeOptions('),source.indexOf('  function cartEntriesForProduct(')),context);
 const start = source.indexOf('  function cartLines()');
 const end = source.indexOf('  function billableShippingWeight(', start);
 assert.ok(start >= 0 && end > start);

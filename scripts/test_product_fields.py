@@ -7,7 +7,7 @@ class ProductFieldTests(test_archives.ArchiveTests):
         product = dict(self.api('/api/products', admin=True)[1]['products'][0])
         shades = [f'{index:03d} Garnet - Shade' for index in range(1, 1001)]
         product.update(colors=shades, brand='Brand' * 200, name='Name' * 300,
-                       category='Category' * 100, sku='SKU' * 100,
+                       category='Category' * 100,
                        description=('Product information. ' * 3000).strip(),
                        images=[f'/src/assets/uploads/image-{i}.jpg' for i in range(100)])
         product['image'] = product['images'][0]

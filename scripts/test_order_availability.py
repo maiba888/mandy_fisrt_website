@@ -40,7 +40,7 @@ class OrderAvailabilityTests(test_archives.ArchiveTests):
         self.assertEqual(self.db.execute('SELECT COUNT(*) FROM orders').fetchone()[0],0)
 
     def test_archive_between_preparation_and_insert_is_rejected(self):
-        items=[dict(id='sample',qty=1)]
+        items=[dict(id='sample',qty=1,color='01')]
         prepared=server.prepare_order_data(items,'Europe')
         self.db.execute("UPDATE products SET archived_at=1,published=0 WHERE id='sample'")
         self.db.commit()
@@ -50,7 +50,7 @@ class OrderAvailabilityTests(test_archives.ArchiveTests):
         self.assertEqual(self.db.execute('SELECT COUNT(*) FROM orders').fetchone()[0],0)
 
     def test_active_order_and_historical_export_remain_supported(self):
-        order=server.create_order_record([dict(id='sample',qty=2)],'Europe')
+        order=server.create_order_record([dict(id='sample',qty=2,color='01')],'Europe')
         self.assertEqual(self.db.execute('SELECT COUNT(*) FROM orders').fetchone()[0],1)
         self.db.execute("UPDATE products SET archived_at=1,published=0 WHERE id='sample'")
         self.db.commit()

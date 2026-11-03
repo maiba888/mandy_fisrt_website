@@ -36,6 +36,7 @@
     cartFeedback: null,
     shippingCountry: "Europe",
     orderStatus: "",
+    orderSubmitting: false,
     adminLoginError: "",
     adminStatus: "",
     adminSearch: "",
@@ -337,9 +338,16 @@
     return cart.map((item) => {
       const product = products.find((p) => p.id === item.id);
       const merged = product ? { ...item, ...product, color: item.color, qty: item.qty, key: item.key } : item;
+      const options = product ? shadeOptions(product) : [];
       return {
         ...merged,
-        available: Boolean(product && product.published !== false && !product.archived_at),
+        available: Boolean(product && product.published !== false && !product.archived_at
+          && (options.includes(item.color || "Default")
+            || (options.length === 1 && options[0] === "Default"
+              && String(item.color || "Default").toLowerCase() === "default"))
+          && Number.isSafeInteger(Number(item.qty)) && Number(item.qty) > 0
+          && Number.isFinite(Number(product.price)) && Number(product.price) > 0
+          && Number.isFinite(Number(product.weight)) && Number(product.weight) > 0),
         price: Number(merged.price || 0),
         weight: Number(merged.weight || 0),
         qty: Math.max(1, Number(merged.qty || 1)),
@@ -820,8 +828,8 @@
               <div><span>TOTAL</span><strong>${money(totals.total)}</strong></div>
             </div>
             ${state.orderStatus ? `<div class="notice">${escapeHTML(state.orderStatus)}</div>` : ""}
-            ${unavailable ? `<div class="notice" role="alert">Some products are no longer available. Remove the unavailable items before ordering.</div>` : !apiOnline ? `<div class="notice" role="alert">Unable to verify the catalog. Refresh the page before ordering.</div>` : ""}
-            <button class="primary" style="width:100%;margin-bottom:10px;" data-create-order ${unavailable || !apiOnline ? "disabled" : ""}>Create order & Contact Supplier</button>
+            ${unavailable ? `<div class="notice" role="alert">Some cart items are unavailable or have an invalid quantity. Remove them or choose a current shade and a whole-number quantity before ordering.</div>` : !apiOnline ? `<div class="notice" role="alert">Unable to verify the catalog. Refresh the page before ordering.</div>` : ""}
+            <button class="primary" style="width:100%;margin-bottom:10px;" data-create-order ${unavailable || !apiOnline || state.orderSubmitting ? "disabled" : ""}>${state.orderSubmitting ? "Creating order..." : "Create order & Contact Supplier"}</button>
             <button class="ghost" style="width:100%;" data-clear-cart>Clear cart</button>
             <p class="small">The order will be saved on the server. WhatsApp will open with the order number only. Current receiving number: ${escapeHTML(whatsappNumber)}.</p>
           </div>
@@ -864,7 +872,7 @@
     return `
       <div class="cart-item">
         <div class="thumb">${item.image ? `<img src="${escapeHTML(item.image)}" alt="${escapeHTML(item.name)}" loading="lazy" decoding="async">` : escapeHTML(item.brand.slice(0, 2))}</div>
-        <div><strong>${escapeHTML(item.name)}</strong>${!item.available ? `<div class="notice" role="alert">No longer available</div>` : ""}<div class="small">${escapeHTML(item.color || "Default")} · ${weight(item.weight * item.qty)}</div></div>
+        <div><strong>${escapeHTML(item.name)}</strong>${!item.available ? `<div class="notice" role="alert">Item or shade unavailable, or quantity invalid</div>` : ""}<div class="small">${escapeHTML(item.color || "Default")} · ${weight(item.weight * item.qty)}</div></div>
         <input type="number" min="1" value="${item.qty}" data-cart-qty="${index}">
         <div><strong>${money(item.qty * item.price)}</strong><div class="small">${money(item.price)} each</div></div>
         <button class="ghost" data-remove-cart="${index}">Remove</button>
@@ -880,14 +888,15 @@
   }
 
   async function createOrderAndContact() {
-    if (!cart.length) return;
+    if (!cart.length || state.orderSubmitting) return;
+    state.orderSubmitting = true;
     state.orderStatus = "Creating order...";
     renderCart();
     try {
       await refreshProducts();
       const totals = cartTotals();
       if (totals.lines.some((item) => !item.available)) {
-        throw new Error("Some products are no longer available. Remove the marked items before ordering.");
+        throw new Error("Some cart items are unavailable or invalid. Remove or correct the marked items before ordering.");
       }
       const result = await apiFetch("/api/orders", {
         method: "POST",
@@ -905,6 +914,8 @@
       window.open(`https://wa.me/${whatsappTarget()}?text=${encodeURIComponent(whatsappMessage(result.orderNo))}`, "_blank");
     } catch (error) {
       state.orderStatus = error.message;
+    } finally {
+      state.orderSubmitting = false;
       renderCart();
     }
   }
